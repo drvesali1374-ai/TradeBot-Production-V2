@@ -1,0 +1,9 @@
+name = "tradebot-v2-scheduler"
+main = "src/index.ts"
+compatibility_date = "2026-01-15"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+APP_URL = "https://tradebot-v2.pages.dev"

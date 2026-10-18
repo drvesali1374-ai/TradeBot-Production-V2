@@ -1,0 +1,915 @@
+     1→'use client'
+     2→
+     3→/**
+     4→ * ChartView — professional trading chart (lightweight-charts v5).
+     5→ *
+     6→ * • Candlestick + volume histogram (volume on its own bottom-scaled axis)
+     7→ * • Signal markers + TP/SL/Entry price lines from /api/market/analysis
+     8→ * • Canvas drawing overlay (hline/vline/trend/rect/measure) using LOGICAL
+     9→ *   coordinates (bar-time + price) so drawings track the data on pan/zoom
+    10→ * • Crosshair OHLCV+RSI readout, live ticker price (10s), theme-aware
+    11→ *   (re-reads CSS variables when data-theme flips), fully RTL layout.
+    12→ */
+    13→import { useCallback, useEffect, useRef, useState } from 'react'
+    14→import type { MouseEvent as ReactMouseEvent } from 'react'
+    15→import {
+    16→  CandlestickSeries,
+    17→  HistogramSeries,
+    18→  LineStyle,
+    19→  createChart,
+    20→  createSeriesMarkers,
+    21→} from 'lightweight-charts'
+    22→import type {
+    23→  IChartApi,
+    24→  IPriceLine,
+    25→  ISeriesApi,
+    26→  ISeriesMarkersPluginApi,
+    27→  MouseEventParams,
+    28→  SeriesMarker,
+    29→  Time,
+    30→  UTCTimestamp,
+    31→} from 'lightweight-charts'
+    32→import { apiGet } from '@/modules/common/api'
+    33→import { fmtNum, fmtPrice } from '@/modules/common/format'
+    34→import { ChartToolbar } from './ChartToolbar'
+    35→import {
+    36→  ENTRY_COLOR,
+    37→  DOWN_COLOR,
+    38→  DOWN_VOLUME,
+    39→  UP_COLOR,
+    40→  UP_VOLUME,
+    41→  chartOptionsFor,
+    42→  readPalette,
+    43→} from './chartTheme'
+    44→import { renderDrawing, type OverlayRenderInput } from './drawingRender'
+    45→import {
+    46→  INTERVAL_MS,
+    47→  type AnalysisResponse,
+    48→  type Candle,
+    49→  type Drawing,
+    50→  type DrawingDraft,
+    51→  type DrawingToolId,
+    52→  type KlinesResponse,
+    53→  type Signal,
+    54→  type SignalStatus,
+    55→  type TickerResponse,
+    56→} from './types'
+    57→
+    58→/* ------------------------------------------------------------------ */
+    59→/* Props                                                               */
+    60→/* ------------------------------------------------------------------ */
+    61→
+    62→export interface ChartViewProps {
+    63→  initialSymbol: string
+    64→  onSymbolChange?: (symbol: string) => void
+    65→}
+    66→
+    67→interface SignalState {
+    68→  signals: Signal[]
+    69→  pending: Signal | null
+    70→  /** interval the analysis engine actually used (may differ from chart) */
+    71→  analysisInterval: string | null
+    72→}
+    73→
+    74→const SIGNAL_STATUS_META: Record<SignalStatus, { label: string; cls: string }> = {
+    75→  PENDING: { label: 'در انتظار', cls: 'badge-warning' },
+    76→  OPENED: { label: 'باز شد', cls: 'badge-success' },
+    77→  EXPIRED: { label: 'منقضی', cls: 'badge-danger' },
+    78→  NOT_OPENED: { label: 'باز نشد', cls: 'badge-info' },
+    79→}
+    80→
+    81→/**
+    82→ * Greatest bar open-time (UNIX seconds) at-or-before targetMs.
+    83→ * Snapping keeps markers placeable even when the analysis interval differs
+    84→ * from the chart interval (larger intervals align to smaller boundaries).
+    85→ */
+    86→function snapBarTimeSec(candles: Candle[], targetMs: number, intervalMs: number): number | null {
+    87→  if (candles.length === 0) return null
+    88→  const first = candles[0]
+    89→  const last = candles[candles.length - 1]
+    90→  if (targetMs < first.openTime - intervalMs) return null
+    91→  if (targetMs > last.openTime + intervalMs) return null
+    92→  let lo = 0
+    93→  let hi = candles.length - 1
+    94→  let ans = 0
+    95→  while (lo <= hi) {
+    96→    const mid = (lo + hi) >> 1
+    97→    if (candles[mid].openTime <= targetMs) {
+    98→      ans = mid
+    99→      lo = mid + 1
+   100→    } else {
+   101→      hi = mid - 1
+   102→    }
+   103→  }
+   104→  return Math.floor(candles[ans].openTime / 1000)
+   105→}
+   106→
+   107→/* ------------------------------------------------------------------ */
+   108→/* Component                                                           */
+   109→/* ------------------------------------------------------------------ */
+   110→
+   111→export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
+   112→  /* ——— state ——— */
+   113→  const [symbol, setSymbol] = useState(initialSymbol || 'BTC')
+   114→  const [interval, setInterval] = useState('1h')
+   115→  const [loading, setLoading] = useState(true)
+   116→  const [error, setError] = useState<string | null>(null)
+   117→  const [reloadKey, setReloadKey] = useState(0)
+   118→  const [livePrice, setLivePrice] = useState<number | null>(null)
+   119→  const [priceUp, setPriceUp] = useState<boolean | null>(null)
+   120→  const [lastClose, setLastClose] = useState<number | null>(null)
+   121→  const [showSignals, setShowSignals] = useState(true)
+   122→  const [tool, setTool] = useState<DrawingToolId>('none')
+   123→  const [drawings, setDrawings] = useState<Drawing[]>([])
+   124→  const [hoverCandle, setHoverCandle] = useState<Candle | null>(null)
+   125→  const [signalState, setSignalState] = useState<SignalState | null>(null)
+   126→
+   127→  /* ——— refs (imperative chart world) ——— */
+   128→  const containerRef = useRef<HTMLDivElement | null>(null)
+   129→  const overlayRef = useRef<HTMLCanvasElement | null>(null)
+   130→  const chartRef = useRef<IChartApi | null>(null)
+   131→  const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+   132→  const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+   133→  const markersApiRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null)
+   134→  const priceLinesRef = useRef<IPriceLine[]>([])
+   135→  const candlesRef = useRef<Candle[]>([])
+   136→  const candlesByTimeRef = useRef<Map<number, Candle>>(new Map())
+   137→  const rsiByTimeRef = useRef<Map<number, number>>(new Map())
+   138→  const analysisRef = useRef<AnalysisResponse | null>(null)
+   139→  const signalsVisibleRef = useRef(true)
+   140→  const intervalMsRef = useRef<number>(INTERVAL_MS[interval] ?? 3_600_000)
+   141→  const draftRef = useRef<DrawingDraft | null>(null)
+   142→  const drawingsRef = useRef<Drawing[]>([])
+   143→  const drawingsRevRef = useRef(0)
+   144→  const loadIdRef = useRef(0)
+   145→  const symbolRef = useRef(symbol)
+   146→  const nextIdRef = useRef(1)
+   147→  const onSymbolChangeRef = useRef(onSymbolChange)
+   148→  const prevTickRef = useRef<number | null>(null)
+   149→
+   150→  useEffect(() => {
+   151→    onSymbolChangeRef.current = onSymbolChange
+   152→  }, [onSymbolChange])
+   153→
+   154→  /* ---------------------------------------------------------------- */
+   155→  /* Overlay rendering (logical → pixel on every chart redraw)        */
+   156→  /* ---------------------------------------------------------------- */
+   157→
+   158→  const redrawOverlay = useCallback(() => {
+   159→    const canvas = overlayRef.current
+   160→    const chart = chartRef.current
+   161→    const series = candleRef.current
+   162→    if (!canvas || !chart || !series) return
+   163→    const ctx = canvas.getContext('2d')
+   164→    if (!ctx) return
+   165→    const w = canvas.clientWidth
+   166→    const h = canvas.clientHeight
+   167→    if (w < 2 || h < 2) return
+   168→
+   169→    const dpr = window.devicePixelRatio || 1
+   170→    const pw = Math.round(w * dpr)
+   171→    const ph = Math.round(h * dpr)
+   172→    if (canvas.width !== pw || canvas.height !== ph) {
+   173→      canvas.width = pw
+   174→      canvas.height = ph
+   175→    }
+   176→    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+   177→    ctx.clearRect(0, 0, w, h)
+   178→
+   179→    const ts = chart.timeScale()
+   180→    const input: OverlayRenderInput = {
+   181→      w,
+   182→      h,
+   183→      xOfTime: (t) => ts.timeToCoordinate(t as UTCTimestamp),
+   184→      yOfPrice: (p) => series.priceToCoordinate(p),
+   185→      palette: readPalette(),
+   186→      intervalMs: intervalMsRef.current,
+   187→    }
+   188→    for (const d of drawingsRef.current) renderDrawing(ctx, input, d)
+   189→    const draft = draftRef.current
+   190→    if (draft) renderDrawing(ctx, { ...input, isPreview: true }, draft)
+   191→  }, [])
+   192→
+   193→  /**
+   194→   * Signature of everything that affects overlay geometry (visible logical
+   195→   * range, price mapping of the last close, canvas size, drawings revision,
+   196→   * draft position). A rAF watchdog compares it every frame — this catches
+   197→   * price-axis drags & auto-rescales which have no dedicated event.
+   198→   */
+   199→  const overlaySignature = useCallback(() => {
+   200→    const chart = chartRef.current
+   201→    const series = candleRef.current
+   202→    const canvas = overlayRef.current
+   203→    if (!chart || !series || !canvas) return 'no'
+   204→    const lr = chart.timeScale().getVisibleLogicalRange()
+   205→    const last = candlesRef.current.length ? candlesRef.current[candlesRef.current.length - 1] : null
+   206→    const y = last ? series.priceToCoordinate(last.close) : null
+   207→    const x = last ? chart.timeScale().timeToCoordinate((last.openTime / 1000) as UTCTimestamp) : null
+   208→    const draft = draftRef.current
+   209→    return [
+   210→      canvas.clientWidth,
+   211→      canvas.clientHeight,
+   212→      lr ? `${lr.from.toFixed(2)}:${lr.to.toFixed(2)}` : '-',
+   213→      y != null ? y.toFixed(1) : '-',
+   214→      x != null ? x.toFixed(1) : '-',
+   215→      drawingsRevRef.current,
+   216→      draft ? `${draft.time2}:${draft.price2}` : '-',
+   217→    ].join('|')
+   218→  }, [])
+   219→
+   220→  /* ---------------------------------------------------------------- */
+   221→  /* Chart lifecycle (create once, theme/resize observers, cleanup)   */
+   222→  /* ---------------------------------------------------------------- */
+   223→
+   224→  useEffect(() => {
+   225→    const container = containerRef.current
+   226→    if (!container) return
+   227→
+   228→    const chart = createChart(container, {
+   229→      ...chartOptionsFor(readPalette()),
+   230→      width: container.clientWidth,
+   231→      height: container.clientHeight,
+   232→    })
+   233→    const candleSeries = chart.addSeries(CandlestickSeries, {
+   234→      upColor: UP_COLOR,
+   235→      downColor: DOWN_COLOR,
+   236→      wickUpColor: UP_COLOR,
+   237→      wickDownColor: DOWN_COLOR,
+   238→      borderUpColor: UP_COLOR,
+   239→      borderDownColor: DOWN_COLOR,
+   240→    })
+   241→    const volumeSeries = chart.addSeries(HistogramSeries, {
+   242→      priceScaleId: 'volume',
+   243→      priceFormat: { type: 'volume' },
+   244→      lastValueVisible: false,
+   245→      priceLineVisible: false,
+   246→    })
+   247→    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } })
+   248→    const markersApi = createSeriesMarkers(candleSeries, [])
+   249→
+   250→    chartRef.current = chart
+   251→    candleRef.current = candleSeries
+   252→    volumeRef.current = volumeSeries
+   253→    markersApiRef.current = markersApi
+   254→
+   255→    // crosshair → OHLCV/RSI readout (last candle when not hovering)
+   256→    const onCrosshair = (param: MouseEventParams<Time>) => {
+   257→      const t = param.time
+   258→      let next: Candle | null = null
+   259→      if (typeof t === 'number') next = candlesByTimeRef.current.get(t) ?? null
+   260→      if (!next) {
+   261→        const cs = candlesRef.current
+   262→        next = cs.length ? cs[cs.length - 1] : null
+   263→      }
+   264→      if (next) setHoverCandle((prev) => (prev && prev.openTime === next!.openTime ? prev : next))
+   265→    }
+   266→    chart.subscribeCrosshairMove(onCrosshair)
+   267→
+   268→    // redraw overlay on pan/zoom
+   269→    const onRange = () => redrawOverlay()
+   270→    chart.timeScale().subscribeVisibleLogicalRangeChange(onRange)
+   271→
+   272→    // responsive size
+   273→    const onResize = () => {
+   274→      chart.applyOptions({ width: container.clientWidth, height: container.clientHeight })
+   275→      redrawOverlay()
+   276→    }
+   277→    const ro = new ResizeObserver(onResize)
+   278→    ro.observe(container)
+   279→
+   280→    // theme flips → re-apply chart options + overlay colors
+   281→    const applyTheme = () => {
+   282→      chart.applyOptions(chartOptionsFor(readPalette()))
+   283→      redrawOverlay()
+   284→    }
+   285→    const mo = new MutationObserver(applyTheme)
+   286→    mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+   287→
+   288→    // rAF watchdog — redraw the overlay whenever the visual mapping changed
+   289→    let raf = 0
+   290→    let lastSig = ''
+   291→    const tick = () => {
+   292→      const sig = overlaySignature()
+   293→      if (sig !== lastSig) {
+   294→        lastSig = sig
+   295→        redrawOverlay()
+   296→      }
+   297→      raf = requestAnimationFrame(tick)
+   298→    }
+   299→    raf = requestAnimationFrame(tick)
+   300→
+   301→    return () => {
+   302→      cancelAnimationFrame(raf)
+   303→      ro.disconnect()
+   304→      mo.disconnect()
+   305→      markersApi.detach()
+   306→      chart.remove()
+   307→      chartRef.current = null
+   308→      candleRef.current = null
+   309→      volumeRef.current = null
+   310→      markersApiRef.current = null
+   311→    }
+   312→  }, [redrawOverlay, overlaySignature])
+   313→
+   314→  /* ---------------------------------------------------------------- */
+   315→  /* Markers & price lines                                             */
+   316→  /* ---------------------------------------------------------------- */
+   317→
+   318→  const refreshMarkers = useCallback(() => {
+   319→    const api = markersApiRef.current
+   320→    if (!api) return
+   321→    const an = analysisRef.current
+   322→    const candles = candlesRef.current
+   323→    const list: SeriesMarker<Time>[] = []
+   324→    if (an && signalsVisibleRef.current && candles.length > 0) {
+   325→      const intervalMs = intervalMsRef.current
+   326→      const pendingId = an.pendingSignal?.id
+   327→      const seen = new Set<string>()
+   328→      for (const s of an.signals ?? []) {
+   329→        if (seen.has(s.id)) continue
+   330→        seen.add(s.id)
+   331→        const t = snapBarTimeSec(candles, s.candleOpenTime, intervalMs)
+   332→        if (t == null) continue
+   333→        const isPending = pendingId != null && s.id === pendingId
+   334→        const isLong = s.side === 'Long'
+   335→        list.push({
+   336→          time: t as UTCTimestamp,
+   337→          position: isLong ? 'belowBar' : 'aboveBar',
+   338→          color: isLong ? UP_COLOR : DOWN_COLOR,
+   339→          shape: isLong ? 'arrowUp' : 'arrowDown',
+   340→          text: isPending ? (isLong ? 'L · در انتظار' : 'S · در انتظار') : isLong ? 'L' : 'S',
+   341→          size: isPending ? 2 : 1,
+   342→        })
+   343→      }
+   344→      list.sort((a, b) => (a.time as number) - (b.time as number))
+   345→    }
+   346→    api.setMarkers(list)
+   347→  }, [])
+   348→
+   349→  const refreshPriceLines = useCallback(() => {
+   350→    const series = candleRef.current
+   351→    if (!series) return
+   352→    for (const line of priceLinesRef.current) {
+   353→      try {
+   354→        series.removePriceLine(line)
+   355→      } catch {
+   356→        /* already detached */
+   357→      }
+   358→    }
+   359→    priceLinesRef.current = []
+   360→    const pending = analysisRef.current?.pendingSignal
+   361→    if (!pending || !signalsVisibleRef.current) return
+   362→    const mk = (price: number, color: string, style: LineStyle, title: string): IPriceLine =>
+   363→      series.createPriceLine({
+   364→        price,
+   365→        color,
+   366→        lineStyle: style,
+   367→        lineWidth: 1,
+   368→        title,
+   369→        axisLabelVisible: true,
+   370→      })
+   371→    priceLinesRef.current = [
+   372→      mk(pending.price, ENTRY_COLOR, LineStyle.Solid, 'Entry'),
+   373→      mk(pending.tp, UP_COLOR, LineStyle.Dashed, 'TP'),
+   374→      mk(pending.sl, DOWN_COLOR, LineStyle.Dashed, 'SL'),
+   375→    ]
+   376→  }, [])
+   377→
+   378→  /* ---------------------------------------------------------------- */
+   379→  /* Data application                                                  */
+   380→  /* ---------------------------------------------------------------- */
+   381→
+   382→  const applyKlines = useCallback(
+   383→    (candles: Candle[]) => {
+   384→      candlesRef.current = candles
+   385→      candlesByTimeRef.current = new Map(candles.map((c) => [Math.floor(c.openTime / 1000), c]))
+   386→      const series = candleRef.current
+   387→      const vol = volumeRef.current
+   388→      if (series && vol) {
+   389→        series.setData(
+   390→          candles.map((c) => ({
+   391→            time: Math.floor(c.openTime / 1000) as UTCTimestamp,
+   392→            open: c.open,
+   393→            high: c.high,
+   394→            low: c.low,
+   395→            close: c.close,
+   396→          })),
+   397→        )
+   398→        vol.setData(
+   399→          candles.map((c) => ({
+   400→            time: Math.floor(c.openTime / 1000) as UTCTimestamp,
+   401→            value: c.volume,
+   402→            color: c.close >= c.open ? UP_VOLUME : DOWN_VOLUME,
+   403→          })),
+   404→        )
+   405→        // focus the last ~130 candles
+   406→        const n = candles.length
+   407→        chartRef.current?.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 130), to: n + 6 })
+   408→      }
+   409→      setHoverCandle(candles.length ? candles[candles.length - 1] : null)
+   410→      setLastClose(candles.length ? candles[candles.length - 1].close : null)
+   411→      refreshMarkers()
+   412→      refreshPriceLines()
+   413→      redrawOverlay()
+   414→    },
+   415→    [refreshMarkers, refreshPriceLines, redrawOverlay],
+   416→  )
+   417→
+   418→  const applyAnalysis = useCallback(
+   419→    (an: AnalysisResponse | null) => {
+   420→      analysisRef.current = an
+   421→      const rsiMap = new Map<number, number>()
+   422→      if (an) {
+   423→        for (const c of an.candles ?? []) {
+   424→          if (c.rsi != null) rsiMap.set(Math.floor(c.openTime / 1000), c.rsi)
+   425→        }
+   426→      }
+   427→      rsiByTimeRef.current = rsiMap
+   428→      setSignalState(
+   429→        an
+   430→          ? { signals: an.signals ?? [], pending: an.pendingSignal ?? null, analysisInterval: an.interval ?? null }
+   431→          : null,
+   432→      )
+   433→      refreshMarkers()
+   434→      refreshPriceLines()
+   435→      redrawOverlay()
+   436→    },
+   437→    [refreshMarkers, refreshPriceLines, redrawOverlay],
+   438→  )
+   439→
+   440→  /* ---------------------------------------------------------------- */
+   441→  /* Data loading (klines → analysis → markers/price-lines → redraw)  */
+   442→  /* ---------------------------------------------------------------- */
+   443→
+   444→  useEffect(() => {
+   445→    const myId = ++loadIdRef.current
+   446→    let cancelled = false
+   447→    const run = async () => {
+   448→      setLoading(true)
+   449→      setError(null)
+   450→      try {
+   451→        const kl = await apiGet<KlinesResponse>(
+   452→          `/api/market/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=500`,
+   453→        )
+   454→        if (cancelled || myId !== loadIdRef.current) return
+   455→        const candles = (kl.candles ?? []).slice().sort((a, b) => a.openTime - b.openTime)
+   456→        if (candles.length === 0) throw new Error('کندلی برای این نماد یافت نشد')
+   457→        applyKlines(candles)
+   458→        // analysis is secondary — its failure must not blank the candles
+   459→        try {
+   460→          const an = await apiGet<AnalysisResponse>(`/api/market/analysis?symbol=${encodeURIComponent(symbol)}`)
+   461→          if (cancelled || myId !== loadIdRef.current) return
+   462→          applyAnalysis(an)
+   463→        } catch {
+   464→          if (!cancelled && myId === loadIdRef.current) applyAnalysis(null)
+   465→        }
+   466→      } catch (e) {
+   467→        if (cancelled || myId !== loadIdRef.current) return
+   468→        applyAnalysis(null)
+   469→        setError(e instanceof Error ? e.message : 'خطا در دریافت داده‌های بازار')
+   470→      } finally {
+   471→        if (!cancelled && myId === loadIdRef.current) setLoading(false)
+   472→      }
+   473→    }
+   474→    void run()
+   475→    return () => {
+   476→      cancelled = true
+   477→    }
+   478→  }, [symbol, interval, reloadKey, applyKlines, applyAnalysis])
+   479→
+   480→  /* ---------------------------------------------------------------- */
+   481→  /* Live ticker (10s polling)                                         */
+   482→  /* ---------------------------------------------------------------- */
+   483→
+   484→  useEffect(() => {
+   485→    let alive = true
+   486→    prevTickRef.current = null
+   487→    setPriceUp(null)
+   488→    const fetchOnce = async () => {
+   489→      try {
+   490→        const r = await apiGet<TickerResponse>(`/api/market/ticker?symbol=${encodeURIComponent(symbol)}`)
+   491→        if (!alive) return
+   492→        if (typeof r.price === 'number' && Number.isFinite(r.price)) {
+   493→          if (prevTickRef.current != null) setPriceUp(r.price > prevTickRef.current)
+   494→          prevTickRef.current = r.price
+   495→          setLivePrice(r.price)
+   496→        }
+   497→      } catch {
+   498→        /* silent — the pill falls back to the last candle close */
+   499→      }
+   500→    }
+   501→    void fetchOnce()
+   502→    const id = window.setInterval(fetchOnce, 10_000)
+   503→    return () => {
+   504→      alive = false
+   505→      window.clearInterval(id)
+   506→    }
+   507→  }, [symbol])
+   508→
+   509→  /* ---------------------------------------------------------------- */
+   510→  /* State ↔ refs sync                                                 */
+   511→  /* ---------------------------------------------------------------- */
+   512→
+   513→  useEffect(() => {
+   514→    symbolRef.current = symbol
+   515→  }, [symbol])
+   516→
+   517→  useEffect(() => {
+   518→    intervalMsRef.current = INTERVAL_MS[interval] ?? 3_600_000
+   519→  }, [interval])
+   520→
+   521→  useEffect(() => {
+   522→    drawingsRef.current = drawings
+   523→    drawingsRevRef.current++
+   524→    redrawOverlay()
+   525→  }, [drawings, redrawOverlay])
+   526→
+   527→  useEffect(() => {
+   528→    signalsVisibleRef.current = showSignals
+   529→    refreshMarkers()
+   530→    refreshPriceLines()
+   531→  }, [showSignals, refreshMarkers, refreshPriceLines])
+   532→
+   533→  // external symbol changes (e.g. «مشاهده چارت» from other views)
+   534→  useEffect(() => {
+   535→    const s = initialSymbol?.trim()
+   536→    if (s && s !== symbolRef.current) {
+   537→      symbolRef.current = s
+   538→      setSymbol(s)
+   539→    }
+   540→  }, [initialSymbol])
+   541→
+   542→  /* ---------------------------------------------------------------- */
+   543→  /* Drawing interactions                                              */
+   544→  /* ---------------------------------------------------------------- */
+   545→
+   546→  const pushDrawing = useCallback((d: Omit<Drawing, 'id'>) => {
+   547→    setDrawings((prev) => [...prev, { ...d, id: nextIdRef.current++ }])
+   548→  }, [])
+   549→
+   550→  const onOverlayClick = useCallback(
+   551→    (e: ReactMouseEvent<HTMLCanvasElement>) => {
+   552→      const chart = chartRef.current
+   553→      const series = candleRef.current
+   554→      if (!chart || !series || candlesRef.current.length === 0) return
+   555→      if (tool === 'none') return
+   556→      const x = e.nativeEvent.offsetX
+   557→      const y = e.nativeEvent.offsetY
+   558→      // eslint-disable-next-line no-console
+   559→      console.log('[overlay-click]', { tool, x, y, hasDraft: !!draftRef.current })
+   560→      const timeAt = (): number | null => {
+   561→        const t = chart.timeScale().coordinateToTime(x)
+   562→        return typeof t === 'number' ? t : null
+   563→      }
+   564→      const priceAt = (): number | null => series.coordinateToPrice(y)
+   565→
+   566→      if (tool === 'hline') {
+   567→        const price = priceAt()
+   568→        if (price == null) return
+   569→        pushDrawing({ type: 'hline', price1: price, time1: 0, price2: price, time2: 0 })
+   570→        setTool('none')
+   571→      } else if (tool === 'vline') {
+   572→        const t = timeAt()
+   573→        if (t == null) return
+   574→        pushDrawing({ type: 'vline', time1: t, price1: 0, time2: t, price2: 0 })
+   575→        setTool('none')
+   576→      } else if (tool === 'trend' || tool === 'rect' || tool === 'measure') {
+   577→        const draft = draftRef.current
+   578→        if (!draft) {
+   579→          const price = priceAt()
+   580→          const t = timeAt()
+   581→          if (price == null || t == null) return
+   582→          draftRef.current = { type: tool, time1: t, price1: price, time2: t, price2: price }
+   583→        } else {
+   584→          const price = priceAt()
+   585→          const t = timeAt()
+   586→          if (price == null || t == null) return
+   587→          draftRef.current = null
+   588→          pushDrawing({ type: draft.type, time1: draft.time1, price1: draft.price1, time2: t, price2: price })
+   589→          setTool('none')
+   590→        }
+   591→      }
+   592→      redrawOverlay()
+   593→    },
+   594→    [tool, pushDrawing, redrawOverlay],
+   595→  )
+   596→
+   597→  const onOverlayMove = useCallback(
+   598→    (e: ReactMouseEvent<HTMLCanvasElement>) => {
+   599→      const draft = draftRef.current
+   600→      if (!draft) return
+   601→      const chart = chartRef.current
+   602→      const series = candleRef.current
+   603→      if (!chart || !series) return
+   604→      const t = chart.timeScale().coordinateToTime(e.nativeEvent.offsetX)
+   605→      const price = series.coordinateToPrice(e.nativeEvent.offsetY)
+   606→      if (price != null) draft.price2 = price
+   607→      if (typeof t === 'number') draft.time2 = t
+   608→      redrawOverlay()
+   609→    },
+   610→    [redrawOverlay],
+   611→  )
+   612→
+   613→  // Escape cancels the in-progress drawing
+   614→  useEffect(() => {
+   615→    if (tool === 'none') return
+   616→    const onKey = (e: KeyboardEvent) => {
+   617→      if (e.key === 'Escape') {
+   618→        draftRef.current = null
+   619→        setTool('none')
+   620→        redrawOverlay()
+   621→      }
+   622→    }
+   623→    window.addEventListener('keydown', onKey)
+   624→    return () => window.removeEventListener('keydown', onKey)
+   625→  }, [tool, redrawOverlay])
+   626→
+   627→  /* ---------------------------------------------------------------- */
+   628→  /* Toolbar callbacks                                                 */
+   629→  /* ---------------------------------------------------------------- */
+   630→
+   631→  const handleSymbolChange = useCallback((s: string) => {
+   632→    symbolRef.current = s
+   633→    setSymbol(s)
+   634→    onSymbolChangeRef.current?.(s)
+   635→  }, [])
+   636→
+   637→  const handleIntervalChange = useCallback((i: string) => {
+   638→    setInterval(i)
+   639→  }, [])
+   640→
+   641→  const handleRefresh = useCallback(() => setReloadKey((k) => k + 1), [])
+   642→
+   643→  const deleteLastDrawing = useCallback(() => {
+   644→    draftRef.current = null
+   645→    setDrawings((prev) => prev.slice(0, -1))
+   646→  }, [])
+   647→
+   648→  const clearDrawings = useCallback(() => {
+   649→    draftRef.current = null
+   650→    setDrawings([])
+   651→  }, [])
+   652→
+   653→  /* ---------------------------------------------------------------- */
+   654→  /* Render                                                            */
+   655→  /* ---------------------------------------------------------------- */
+   656→
+   657→  const rsiVal = hoverCandle ? rsiByTimeRef.current.get(Math.floor(hoverCandle.openTime / 1000)) : undefined
+   658→  const up = hoverCandle ? hoverCandle.close >= hoverCandle.open : true
+   659→  const rsiColor =
+   660→    rsiVal == null
+   661→      ? 'var(--text-muted)'
+   662→      : rsiVal >= 70
+   663→        ? 'var(--danger)'
+   664→        : rsiVal <= 30
+   665→          ? 'var(--success)'
+   666→          : 'var(--text-primary)'
+   667→
+   668→  return (
+   669→    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0 }}>
+   670→      <ChartToolbar
+   671→        symbol={symbol}
+   672→        onSymbolChange={handleSymbolChange}
+   673→        interval={interval}
+   674→        onIntervalChange={handleIntervalChange}
+   675→        tool={tool}
+   676→        onToolChange={setTool}
+   677→        loading={loading}
+   678→        onRefresh={handleRefresh}
+   679→        price={livePrice ?? lastClose}
+   680→        priceUp={priceUp}
+   681→        showSignals={showSignals}
+   682→        onToggleSignals={() => setShowSignals((v) => !v)}
+   683→        hasDrawings={drawings.length > 0}
+   684→        onDeleteDrawing={deleteLastDrawing}
+   685→        onClearDrawings={clearDrawings}
+   686→      />
+   687→
+   688→      <div className="chart-wrap" style={{ height: '65vh', minHeight: 420, flexShrink: 0 }}>
+   689→        {/* lightweight-charts mounts here */}
+   690→        <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />
+   691→
+   692→        {/* drawing overlay — captures the mouse only while a tool is active */}
+   693→        <canvas
+   694→          ref={overlayRef}
+   695→          className="chart-canvas-overlay"
+   696→          style={{
+   697→            zIndex: 2,
+   698→            pointerEvents: tool === 'none' ? 'none' : 'auto',
+   699→            cursor: tool === 'none' ? 'default' : 'crosshair',
+   700→          }}
+   701→          onClick={onOverlayClick}
+   702→          onMouseMove={onOverlayMove}
+   703→        />
+   704→
+   705→        {/* crosshair readout — O/H/L/C + volume + RSI */}
+   706→        <div
+   707→          style={{
+   708→            position: 'absolute',
+   709→            top: 10,
+   710→            left: 12,
+   711→            zIndex: 3,
+   712→            pointerEvents: 'none',
+   713→            direction: 'ltr',
+   714→            display: 'flex',
+   715→            alignItems: 'center',
+   716→            flexWrap: 'wrap',
+   717→            gap: 12,
+   718→            padding: '5px 12px',
+   719→            borderRadius: 9,
+   720→            background: 'color-mix(in srgb, var(--bg-input) 78%, transparent)',
+   721→            border: '1px solid var(--border-soft)',
+   722→            backdropFilter: 'blur(6px)',
+   723→            fontSize: 11.5,
+   724→            color: 'var(--text-secondary)',
+   725→            maxWidth: 'calc(100% - 96px)',
+   726→          }}
+   727→        >
+   728→          <b style={{ color: 'var(--text-primary)', letterSpacing: 0.4 }}>{symbol}</b>
+   729→          <span className="num">{interval}</span>
+   730→          {hoverCandle ? (
+   731→            <>
+   732→              <span>
+   733→                O&nbsp;<b className="num">{fmtNum(hoverCandle.open)}</b>
+   734→              </span>
+   735→              <span>
+   736→                H&nbsp;<b className="num">{fmtNum(hoverCandle.high)}</b>
+   737→              </span>
+   738→              <span>
+   739→                L&nbsp;<b className="num">{fmtNum(hoverCandle.low)}</b>
+   740→              </span>
+   741→              <span>
+   742→                C&nbsp;
+   743→                <b className="num" style={{ color: up ? 'var(--success)' : 'var(--danger)' }}>
+   744→                  {fmtNum(hoverCandle.close)}
+   745→                </b>
+   746→              </span>
+   747→              <span>
+   748→                V&nbsp;<b className="num">{fmtNum(hoverCandle.volume, 0)}</b>
+   749→              </span>
+   750→              <span>
+   751→                RSI&nbsp;
+   752→                <b className="num" style={{ color: rsiColor }}>
+   753→                  {rsiVal != null ? fmtNum(rsiVal, 1) : '—'}
+   754→                </b>
+   755→              </span>
+   756→            </>
+   757→          ) : null}
+   758→        </div>
+   759→
+   760→        {/* signal legend panel */}
+   761→        {showSignals && signalState && signalState.signals.length > 0 ? (
+   762→          <div
+   763→            style={{
+   764→              position: 'absolute',
+   765→              bottom: 46,
+   766→              left: 12,
+   767→              zIndex: 3,
+   768→              pointerEvents: 'none',
+   769→              direction: 'rtl',
+   770→              width: 250,
+   771→              padding: '8px 10px',
+   772→              borderRadius: 10,
+   773→              background: 'color-mix(in srgb, var(--bg-input) 84%, transparent)',
+   774→              border: '1px solid var(--border-soft)',
+   775→              backdropFilter: 'blur(6px)',
+   776→              fontSize: 11,
+   777→              color: 'var(--text-secondary)',
+   778→            }}
+   779→          >
+   780→            <div
+   781→              style={{
+   782→                display: 'flex',
+   783→                alignItems: 'center',
+   784→                gap: 6,
+   785→                marginBottom: 6,
+   786→                color: 'var(--text-primary)',
+   787→                fontWeight: 700,
+   788→                fontSize: 11.5,
+   789→              }}
+   790→            >
+   791→              <i className="ph ph-chart-line-up" style={{ color: 'var(--accent)', fontSize: 14 }} aria-hidden />
+   792→              سیگنال‌های اخیر
+   793→              <span className="badge badge-accent" style={{ fontSize: 10, padding: '2px 8px' }}>
+   794→                <span className="num">{signalState.signals.length}</span>
+   795→              </span>
+   796→              {signalState.analysisInterval && signalState.analysisInterval !== interval ? (
+   797→                <span className="badge badge-warning" style={{ fontSize: 9.5, padding: '2px 7px' }}>
+   798→                  بازه تحلیل <span className="num">{signalState.analysisInterval}</span>
+   799→                </span>
+   800→              ) : null}
+   801→            </div>
+   802→            <div style={{ display: 'flex', flexDirection: 'column', gap: 5, maxHeight: 158, overflowY: 'auto' }}>
+   803→              {signalState.signals
+   804→                .slice(-6)
+   805→                .reverse()
+   806→                .map((s) => {
+   807→                  const isLong = s.side === 'Long'
+   808→                  const isPending = signalState.pending?.id === s.id
+   809→                  const st = s.status ? SIGNAL_STATUS_META[s.status] : null
+   810→                  return (
+   811→                    <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'space-between' }}>
+   812→                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+   813→                        <i
+   814→                          className={`ph ${isLong ? 'ph-trend-up' : 'ph-trend-down'}`}
+   815→                          style={{ color: isLong ? 'var(--success)' : 'var(--danger)', fontSize: 13 }}
+   816→                          aria-hidden
+   817→                        />
+   818→                        <b style={{ color: isLong ? 'var(--success)' : 'var(--danger)' }}>{isLong ? 'Long' : 'Short'}</b>
+   819→                        {isPending ? (
+   820→                          <i className="ph ph-clock" style={{ color: 'var(--warning)', fontSize: 12 }} aria-hidden />
+   821→                        ) : null}
+   822→                      </span>
+   823→                      <span className="num" style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: 10.5 }}>
+   824→                        {fmtPrice(s.price)}
+   825→                      </span>
+   826→                      <span className="num" style={{ fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+   827→                        TP {fmtNum(s.tp, 1)} / SL {fmtNum(s.sl, 1)}
+   828→                      </span>
+   829→                      {st ? (
+   830→                        <span className={`badge ${st.cls}`} style={{ fontSize: 9.5, padding: '2px 7px', flexShrink: 0 }}>
+   831→                          {st.label}
+   832→                        </span>
+   833→                      ) : null}
+   834→                    </div>
+   835→                  )
+   836→                })}
+   837→            </div>
+   838→          </div>
+   839→        ) : null}
+   840→
+   841→        {/* loading veil */}
+   842→        {loading ? (
+   843→          <div
+   844→            style={{
+   845→              position: 'absolute',
+   846→              inset: 0,
+   847→              zIndex: 5,
+   848→              display: 'grid',
+   849→              placeItems: 'center',
+   850→              background: 'color-mix(in srgb, var(--bg-input) 68%, transparent)',
+   851→            }}
+   852→          >
+   853→            <div
+   854→              style={{
+   855→                display: 'flex',
+   856→                flexDirection: 'column',
+   857→                alignItems: 'center',
+   858→                gap: 8,
+   859→                color: 'var(--text-muted)',
+   860→                fontSize: 12.5,
+   861→              }}
+   862→            >
+   863→              <i className="ph ph-circle-notch spin" style={{ fontSize: 30, color: 'var(--accent)' }} aria-hidden />
+   864→              در حال دریافت داده‌های بازار…
+   865→            </div>
+   866→          </div>
+   867→        ) : null}
+   868→
+   869→        {/* error card + retry */}
+   870→        {error ? (
+   871→          <div
+   872→            style={{
+   873→              position: 'absolute',
+   874→              inset: 0,
+   875→              zIndex: 6,
+   876→              display: 'grid',
+   877→              placeItems: 'center',
+   878→              background: 'color-mix(in srgb, var(--bg-input) 84%, transparent)',
+   879→            }}
+   880→          >
+   881→            <div
+   882→              className="card"
+   883→              style={{
+   884→                padding: 18,
+   885→                maxWidth: 380,
+   886→                display: 'flex',
+   887→                flexDirection: 'column',
+   888→                alignItems: 'center',
+   889→                gap: 10,
+   890→                textAlign: 'center',
+   891→              }}
+   892→            >
+   893→              <i className="ph ph-warning" style={{ fontSize: 30, color: 'var(--danger)' }} aria-hidden />
+   894→              <b style={{ fontSize: 13.5, color: 'var(--text-primary)' }}>خطا در دریافت داده‌های چارت</b>
+   895→              <span style={{ fontSize: 12, color: 'var(--text-secondary)', wordBreak: 'break-word' }}>{error}</span>
+   896→              <button type="button" className="btn btn-outline btn-sm" onClick={handleRefresh}>
+   897→                <i className="ph ph-arrows-clockwise" aria-hidden />
+   898→                تلاش مجدد
+   899→              </button>
+   900→            </div>
+   901→          </div>
+   902→        ) : null}
+   903→      </div>
+   904→
+   905→      <p className="form-hint" style={{ marginTop: -2 }}>
+   906→        <i className="ph ph-info" style={{ color: 'var(--accent)', verticalAlign: '-2px' }} aria-hidden />{' '}
+   907→        برای رسم روی چارت یکی از ابزارها را انتخاب کنید (Esc = لغو رسم). رسم‌ها با جابه‌جایی و بزرگ‌نمایی چارت همراه
+   908→        داده‌ها حرکت می‌کنند.
+   909→      </p>
+   910→    </div>
+   911→  )
+   912→}
+   913→
+   914→export default ChartView
+   915→

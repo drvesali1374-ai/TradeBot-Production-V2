@@ -1,0 +1,8 @@
+{
+  "name": "tradebot-v2-scheduler",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  }
+}

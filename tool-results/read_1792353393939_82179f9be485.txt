@@ -1,0 +1,652 @@
+     1→   600→    const prevDailyHighs: (number | null)[] = []
+     2→   601→    const prevDailyLows: (number | null)[] = []
+     3→   602→    const prevDayCloses: (number | null)[] = []
+     4→   603→    for (let i = 0; i < N; i++) {
+     5→   604→      const localTs = data[i].timestamp.getTime() + offset
+     6→   605→      const day = Math.floor(localTs / 86400000)
+     7→   606→      const prevDayIndex = days.indexOf(day) - 1
+     8→   607→      if (prevDayIndex >= 0) {
+     9→   608→        const prevDay = days[prevDayIndex]
+    10→   609→        prevDailyHighs.push(dailyData[prevDay].maxHigh)
+    11→   610→        prevDailyLows.push(dailyData[prevDay].minLow)
+    12→   611→        prevDayCloses.push(dailyData[prevDay].lastClose)
+    13→   612→      } else {
+    14→   613→        prevDailyHighs.push(null)
+    15→   614→        prevDailyLows.push(null)
+    16→   615→        prevDayCloses.push(null)
+    17→   616→      }
+    18→   617→    }
+    19→   618→
+    20→   619→    const atr = calculateATR(data, marketSettings.atrPeriod || 14)
+    21→   620→    const avgVols = calculateSMA(data.map((d) => d.amount), marketSettings.avgVolPeriod || 50)
+    22→   621→    const rsi = calculateRSI(data, marketSettings.rsiPeriod || 14)
+    23→   622→
+    24→   623→    // Track crossovers (kept for backward compatibility — used when filters are disabled)
+    25→   624→    let lastUL: number | null = null
+    26→   625→    let lastOH: number | null = null
+    27→   626→    const lastCrossUnderPL = new Array(N).fill(Infinity)
+    28→   627→    const lastCrossOverPH = new Array(N).fill(Infinity)
+    29→   628→    for (let i = 1; i < N; i++) {
+    30→   629→      if (data[i].close < (prevDailyLows[i] as number) && data[i - 1].close >= (prevDailyLows[i - 1] as number)) lastUL = i
+    31→   630→      if (data[i].close > (prevDailyHighs[i] as number) && data[i - 1].close <= (prevDailyHighs[i - 1] as number)) lastOH = i
+    32→   631→      lastCrossUnderPL[i] = lastUL === null ? Infinity : i - lastUL
+    33→   632→      lastCrossOverPH[i] = lastOH === null ? Infinity : i - lastOH
+    34→   633→    }
+    35→   634→
+    36→   635→    // ✓ Fake Breakout settings (read from automationSettings — present in scope)
+    37→   636→    const enableMeaningfulBreakFilter = automationSettings.enableMeaningfulBreakFilter !== false
+    38→   637→    // ✓ Phase 17: Direction-specific break ATR multipliers (fall back to legacy breakAtrMultiplier)
+    39→   638→    const breakAtrMultiplierLong =
+    40→   639→      automationSettings.breakAtrMultiplierLong ?? automationSettings.breakAtrMultiplier ?? 0.20
+    41→   640→    const breakAtrMultiplierShort =
+    42→   641→      automationSettings.breakAtrMultiplierShort ?? automationSettings.breakAtrMultiplier ?? 0.20
+    43→   642→    const breakDetectionMethod: 'Wick' | 'Close' =
+    44→   643→      automationSettings.breakDetectionMethod === 'Close' ? 'Close' : 'Wick'
+    45→   644→    const enableBreakLifecycleManagement = automationSettings.enableBreakLifecycleManagement !== false
+    46→   645→    const breakSequenceLifetime = automationSettings.breakSequenceLifetime ?? 0
+    47→   646→
+    48→   647→    // ✓ Track meaningful breaks (used when enableMeaningfulBreakFilter is true)
+    49→   648→    //   A meaningful break for Long = price goes BELOW prevDailyLow by (atr * breakAtrMultiplierLong)
+    50→   649→    //   A meaningful break for Short = price goes ABOVE prevDailyHigh by (atr * breakAtrMultiplierShort)
+    51→   650→    const lastMeaningfulBreakLong = new Array(N).fill(Infinity)
+    52→   651→    const lastMeaningfulBreakShort = new Array(N).fill(Infinity)
+    53→   652→    {
+    54→   653→      let lastMBL: number | null = null
+    55→   654→      let lastMBS: number | null = null
+    56→   655→      for (let i = 1; i < N; i++) {
+    57→   656→        // ✓ Phase 17: Direction-specific ATR multipliers
+    58→   657→        const bdLong = (atr[i] ?? 0) * breakAtrMultiplierLong
+    59→   658→        const bdShort = (atr[i] ?? 0) * breakAtrMultiplierShort
+    60→   659→        let mbl = false
+    61→   660→        let mbs = false
+    62→   661→        if (breakDetectionMethod === 'Wick') {
+    63→   662→          mbl =
+    64→   663→            prevDailyLows[i] !== null &&
+    65→   664→            data[i].low <= ((prevDailyLows[i] as number) - bdLong)
+    66→   665→          mbs =
+    67→   666→            prevDailyHighs[i] !== null &&
+    68→   667→            data[i].high >= ((prevDailyHighs[i] as number) + bdShort)
+    69→   668→        } else {
+    70→   669→          mbl =
+    71→   670→            prevDailyLows[i] !== null &&
+    72→   671→            data[i].close <= ((prevDailyLows[i] as number) - bdLong)
+    73→   672→          mbs =
+    74→   673→            prevDailyHighs[i] !== null &&
+    75→   674→            data[i].close >= ((prevDailyHighs[i] as number) + bdShort)
+    76→   675→        }
+    77→   676→        if (mbl) lastMBL = i
+    78→   677→        if (mbs) lastMBS = i
+    79→   678→        lastMeaningfulBreakLong[i] = lastMBL === null ? Infinity : i - lastMBL
+    80→   679→        lastMeaningfulBreakShort[i] = lastMBS === null ? Infinity : i - lastMBS
+    81→   680→      }
+    82→   681→    }
+    83→   682→
+    84→   683→    // Generate signals
+    85→   684→    const signals: Signal[] = []
+    86→   685→    const htfSource = marketSettings.htfConfirmationSource || 'signalCandleClose'
+    87→   686→
+    88→   687→    // ✓ Break Lifecycle State Machine (used when enableBreakLifecycleManagement is true)
+    89→   688→    interface BreakState {
+    90→   689→      active: boolean
+    91→   690→      type: 'Long' | 'Short' | null
+    92→   691→      breakCandleIndex: number | null
+    93→   692→      waitingRecovery: boolean
+    94→   693→      recovered: boolean
+    95→   694→      recoveryCandleIndex: number | null
+    96→   695→    }
+    97→   696→    const resetBreakState = (): BreakState => ({
+    98→   697→      active: false,
+    99→   698→      type: null,
+   100→   699→      breakCandleIndex: null,
+   101→   700→      waitingRecovery: false,
+   102→   701→      recovered: false,
+   103→   702→      recoveryCandleIndex: null
+   104→   703→    })
+   105→   704→    let breakState: BreakState = resetBreakState()
+   106→   705→
+   107→   706→    for (let i = 1; i < N - 1; i++) {
+   108→   707→      // HTF confirmation (always computed — used by both branches)
+   109→   708→      let htfConfirmLong: boolean
+   110→   709→      let htfConfirmShort: boolean
+   111→   710→      if (htfSource === 'previousDayClose') {
+   112→   711→        htfConfirmLong = prevDayCloses[i] !== null && (prevDayCloses[i] as number) > (prevDailyLows[i] as number)
+   113→   712→        htfConfirmShort = prevDayCloses[i] !== null && (prevDayCloses[i] as number) < (prevDailyHighs[i] as number)
+   114→   713→      } else {
+   115→   714→        htfConfirmLong = prevDailyLows[i] !== null && data[i].close > (prevDailyLows[i] as number)
+   116→   715→        htfConfirmShort = prevDailyHighs[i] !== null && data[i].close < (prevDailyHighs[i] as number)
+   117→   716→      }
+   118→   717→
+   119→   718→      data[i].rsi = rsi[i]
+   120→   719→      data[i].atr = atr[i]
+   121→   720→
+   122→   721→      if (enableBreakLifecycleManagement) {
+   123→   722→        // ===========================================================
+   124→   723→        // ✓ Fake Breakout: Break Lifecycle Management state machine
+   125→   724→        //   Signal is generated at the RECOVERY candle (price closing
+   126→   725→        //   back inside the prior day range), not at the break candle.
+   127→   726→        // ===========================================================
+   128→   727→
+   129→   728→        // Compute meaningful break conditions for this candle
+   130→   729→        // ✓ Phase 17: Direction-specific ATR multipliers
+   131→   730→        const breakDistanceLong = (atr[i] ?? 0) * breakAtrMultiplierLong
+   132→   731→        const breakDistanceShort = (atr[i] ?? 0) * breakAtrMultiplierShort
+   133→   732→        let isMeaningfulBreakLong = false
+   134→   733→        let isMeaningfulBreakShort = false
+   135→   734→        if (breakDetectionMethod === 'Wick') {
+   136→   735→          isMeaningfulBreakLong =
+   137→   736→            prevDailyLows[i] !== null &&
+   138→   737→            data[i].low <= ((prevDailyLows[i] as number) - breakDistanceLong)
+   139→   738→          isMeaningfulBreakShort =
+   140→   739→            prevDailyHighs[i] !== null &&
+   141→   740→            data[i].high >= ((prevDailyHighs[i] as number) + breakDistanceShort)
+   142→   741→        } else {
+   143→   742→          isMeaningfulBreakLong =
+   144→   743→            prevDailyLows[i] !== null &&
+   145→   744→            data[i].close <= ((prevDailyLows[i] as number) - breakDistanceLong)
+   146→   745→          isMeaningfulBreakShort =
+   147→   746→            prevDailyHighs[i] !== null &&
+   148→   747→            data[i].close >= ((prevDailyHighs[i] as number) + breakDistanceShort)
+   149→   748→        }
+   150→   749→
+   151→   750→        // 1. Check expiry — if a break has been waiting too long without recovery, discard it
+   152→   751→        if (breakState.active && !breakState.recovered && breakState.breakCandleIndex !== null) {
+   153→   752→          const lifetime = breakSequenceLifetime > 0 ? breakSequenceLifetime : (marketSettings.lookback || 50)
+   154→   753→          if (i - (breakState.breakCandleIndex as number) > lifetime) {
+   155→   754→            breakState = resetBreakState()
+   156→   755→          }
+   157→   756→        }
+   158→   757→
+   159→   758→        // 2. Check for new meaningful break (only if no active break, or previous one recovered/consumed)
+   160→   759→        if (!breakState.active || breakState.recovered) {
+   161→   760→          if (isMeaningfulBreakLong) {
+   162→   761→            breakState = {
+   163→   762→              active: true,
+   164→   763→              type: 'Long',
+   165→   764→              breakCandleIndex: i,
+   166→   765→              waitingRecovery: true,
+   167→   766→              recovered: false,
+   168→   767→              recoveryCandleIndex: null
+   169→   768→            }
+   170→   769→          } else if (isMeaningfulBreakShort) {
+   171→   770→            breakState = {
+   172→   771→              active: true,
+   173→   772→              type: 'Short',
+   174→   773→              breakCandleIndex: i,
+   175→   774→              waitingRecovery: true,
+   176→   775→              recovered: false,
+   177→   776→              recoveryCandleIndex: null
+   178→   777→            }
+   179→   778→          }
+   180→   779→        }
+   181→   780→
+   182→   781→        // 3. Check for new break while waiting recovery (replace old break if OPPOSITE direction)
+   183→   782→        if (breakState.active && !breakState.recovered) {
+   184→   783→          if (breakState.type === 'Long' && isMeaningfulBreakShort) {
+   185→   784→            breakState = {
+   186→   785→              active: true,
+   187→   786→              type: 'Short',
+   188→   787→              breakCandleIndex: i,
+   189→   788→              waitingRecovery: true,
+   190→   789→              recovered: false,
+   191→   790→              recoveryCandleIndex: null
+   192→   791→            }
+   193→   792→          } else if (breakState.type === 'Short' && isMeaningfulBreakLong) {
+   194→   793→            breakState = {
+   195→   794→              active: true,
+   196→   795→              type: 'Long',
+   197→   796→              breakCandleIndex: i,
+   198→   797→              waitingRecovery: true,
+   199→   798→              recovered: false,
+   200→   799→              recoveryCandleIndex: null
+   201→   800→            }
+   202→   801→          }
+   203→   802→        }
+   204→   803→
+   205→   804→        // 4. Check recovery — price closes back inside the prior day range
+   206→   805→        if (breakState.active && breakState.waitingRecovery) {
+   207→   806→          if (breakState.type === 'Long') {
+   208→   807→            // Recovery: price closes back above Previous Daily Low
+   209→   808→            if (data[i].close > (prevDailyLows[i] as number)) {
+   210→   809→              breakState.recovered = true
+   211→   810→              breakState.recoveryCandleIndex = i
+   212→   811→              breakState.waitingRecovery = false
+   213→   812→            }
+   214→   813→          } else if (breakState.type === 'Short') {
+   215→   814→            // Recovery: price closes back below Previous Daily High
+   216→   815→            if (data[i].close < (prevDailyHighs[i] as number)) {
+   217→   816→              breakState.recovered = true
+   218→   817→              breakState.recoveryCandleIndex = i
+   219→   818→              breakState.waitingRecovery = false
+   220→   819→            }
+   221→   820→          }
+   222→   821→        }
+   223→   822→
+   224→   823→        // 5. Generate signal ONLY if recovered, on the recovery candle
+   225→   824→        if (breakState.recovered && breakState.recoveryCandleIndex === i) {
+   226→   825→          if (breakState.type === 'Long') {
+   227→   826→            const condLong =
+   228→   827→              avgVols[i] !== null &&
+   229→   828→              data[i].amount > (avgVols[i] as number) * (automationSettings.volMultLong ?? marketSettings.volMult ?? 0.2) &&
+   230→   829→              rsi[i] !== null &&
+   231→   830→              (rsi[i] as number) < (automationSettings.rsiLongThreshold ?? marketSettings.rsiThreshold ?? 30) &&
+   232→   831→              htfConfirmLong
+   233→   832→
+   234→   833→            if (condLong) {
+   235→   834→              data[i].signal = 'Long'
+   236→   835→              if (marketSettings.longFixedTp !== null && !isNaN(marketSettings.longFixedTp as number)) {
+   237→   836→                data[i].tp = data[i].close + data[i].close * (marketSettings.longFixedTp as number / 100)
+   238→   837→              } else {
+   239→   838→                data[i].tp = data[i].close + atr[i] * (marketSettings.tpLongMult || 20)
+   240→   839→              }
+   241→   840→              if (marketSettings.longFixedSl !== null && !isNaN(marketSettings.longFixedSl as number)) {
+   242→   841→                data[i].sl = data[i].close - data[i].close * (marketSettings.longFixedSl as number / 100)
+   243→   842→              } else {
+   244→   843→                data[i].sl = data[i].close - atr[i] * (marketSettings.slLongMult || 6)
+   245→   844→              }
+   246→   845→              data[i].clientOrderId = generateOrderId(data[i].timestamp, symbol.name)
+   247→   846→              signals.push({
+   248→   847→                type: 'Long',
+   249→   848→                timestamp: data[i].timestamp,
+   250→   849→                price: data[i].close,
+   251→   850→                tp: data[i].tp as number,
+   252→   851→                sl: data[i].sl as number,
+   253→   852→                orderId: data[i].clientOrderId as string,
+   254→   853→                symbol: symbol.name,
+   255→   854→                // ✓ مورد ۶: candle index — used by min-same-direction-candles risk control
+   256→   855→                candleIndex: i
+   257→   856→              })
+   258→   857→            }
+   259→   858→          } else if (breakState.type === 'Short') {
+   260→   859→            const condShort =
+   261→   860→              avgVols[i] !== null &&
+   262→   861→              data[i].amount > (avgVols[i] as number) * (automationSettings.volMultShort ?? marketSettings.volMult ?? 0.2) &&
+   263→   862→              rsi[i] !== null &&
+   264→   863→              (rsi[i] as number) > (automationSettings.rsiShortThreshold ?? marketSettings.rsiThreshold ?? 70) &&
+   265→   864→              htfConfirmShort
+   266→   865→
+   267→   866→            if (condShort) {
+   268→   867→              data[i].signal = 'Short'
+   269→   868→              if (marketSettings.shortFixedTp !== null && !isNaN(marketSettings.shortFixedTp as number)) {
+   270→   869→                data[i].tp = data[i].close - data[i].close * (marketSettings.shortFixedTp as number / 100)
+   271→   870→              } else {
+   272→   871→                data[i].tp = data[i].close - atr[i] * (marketSettings.tpShortMult || 24)
+   273→   872→              }
+   274→   873→              if (marketSettings.shortFixedSl !== null && !isNaN(marketSettings.shortFixedSl as number)) {
+   275→   874→                data[i].sl = data[i].close + data[i].close * (marketSettings.shortFixedSl as number / 100)
+   276→   875→              } else {
+   277→   876→                data[i].sl = data[i].close + atr[i] * (marketSettings.slShortMult || 4)
+   278→   877→              }
+   279→   878→              data[i].clientOrderId = generateOrderId(data[i].timestamp, symbol.name)
+   280→   879→              signals.push({
+   281→   880→                type: 'Short',
+   282→   881→                timestamp: data[i].timestamp,
+   283→   882→                price: data[i].close,
+   284→   883→                tp: data[i].tp as number,
+   285→   884→                sl: data[i].sl as number,
+   286→   885→                orderId: data[i].clientOrderId as string,
+   287→   886→                symbol: symbol.name,
+   288→   887→                // ✓ مورد ۶: candle index — used by min-same-direction-candles risk control
+   289→   888→                candleIndex: i
+   290→   889→              })
+   291→   890→            }
+   292→   891→          }
+   293→   892→
+   294→   893→          // Reset after signal generation (break is consumed whether or not signal was generated)
+   295→   894→          breakState = resetBreakState()
+   296→   895→        }
+   297→   896→      } else {
+   298→   897→        // ===========================================================
+   299→   898→        // ✓ Backward compatible: original logic (with optional meaningful break filter)
+   300→   899→        //   When enableMeaningfulBreakFilter is false → EXACT original behavior
+   301→   900→        //   When enableMeaningfulBreakFilter is true  → prior-break crossover check
+   302→   901→        //     is replaced with the meaningful break check (filter out weak breaks)
+   303→   902→        // ===========================================================
+   304→   903→        const isCrossOverPL = data[i].close > (prevDailyLows[i] as number) && data[i - 1].close <= (prevDailyLows[i - 1] as number)
+   305→   904→        const isCrossUnderPH = data[i].close < (prevDailyHighs[i] as number) && data[i - 1].close >= (prevDailyHighs[i - 1] as number)
+   306→   905→
+   307→   906→        // Recent prior break — use meaningful break tracker when filter is enabled,
+   308→   907→        // otherwise use plain crossover tracker (original behavior)
+   309→   908→        const recentBreakLong = enableMeaningfulBreakFilter
+   310→   909→          ? lastMeaningfulBreakLong[i]
+   311→   910→          : lastCrossUnderPL[i]
+   312→   911→        const recentBreakShort = enableMeaningfulBreakFilter
+   313→   912→          ? lastMeaningfulBreakShort[i]
+   314→   913→          : lastCrossOverPH[i]
+   315→   914→
+   316→   915→        const condLong =
+   317→   916→          isCrossOverPL &&
+   318→   917→          recentBreakLong <= (marketSettings.lookback || 50) &&
+   319→   918→          avgVols[i] !== null &&
+   320→   919→          data[i].amount > (avgVols[i] as number) * (automationSettings.volMultLong ?? marketSettings.volMult ?? 0.2) &&
+   321→   920→          rsi[i] !== null &&
+   322→   921→          (rsi[i] as number) < (automationSettings.rsiLongThreshold ?? marketSettings.rsiThreshold ?? 30) &&
+   323→   922→          htfConfirmLong
+   324→   923→
+   325→   924→        const condShort =
+   326→   925→          isCrossUnderPH &&
+   327→   926→          recentBreakShort <= (marketSettings.lookback || 50) &&
+   328→   927→          avgVols[i] !== null &&
+   329→   928→          data[i].amount > (avgVols[i] as number) * (automationSettings.volMultShort ?? marketSettings.volMult ?? 0.2) &&
+   330→   929→          rsi[i] !== null &&
+   331→   930→          (rsi[i] as number) > (automationSettings.rsiShortThreshold ?? marketSettings.rsiThreshold ?? 70) &&
+   332→   931→          htfConfirmShort
+   333→   932→
+   334→   933→        if (condLong) {
+   335→   934→          data[i].signal = 'Long'
+   336→   935→          if (marketSettings.longFixedTp !== null && !isNaN(marketSettings.longFixedTp as number)) {
+   337→   936→            data[i].tp = data[i].close + data[i].close * (marketSettings.longFixedTp as number / 100)
+   338→   937→          } else {
+   339→   938→            data[i].tp = data[i].close + atr[i] * (marketSettings.tpLongMult || 20)
+   340→   939→          }
+   341→   940→          if (marketSettings.longFixedSl !== null && !isNaN(marketSettings.longFixedSl as number)) {
+   342→   941→            data[i].sl = data[i].close - data[i].close * (marketSettings.longFixedSl as number / 100)
+   343→   942→          } else {
+   344→   943→            data[i].sl = data[i].close - atr[i] * (marketSettings.slLongMult || 6)
+   345→   944→          }
+   346→   945→          data[i].clientOrderId = generateOrderId(data[i].timestamp, symbol.name)
+   347→   946→          signals.push({
+   348→   947→            type: 'Long',
+   349→   948→            timestamp: data[i].timestamp,
+   350→   949→            price: data[i].close,
+   351→   950→            tp: data[i].tp as number,
+   352→   951→            sl: data[i].sl as number,
+   353→   952→            orderId: data[i].clientOrderId as string,
+   354→   953→            symbol: symbol.name,
+   355→   954→            // ✓ مورد ۶: candle index — used by min-same-direction-candles risk control
+   356→   955→            candleIndex: i
+   357→   956→          })
+   358→   957→        } else if (condShort) {
+   359→   958→          data[i].signal = 'Short'
+   360→   959→          if (marketSettings.shortFixedTp !== null && !isNaN(marketSettings.shortFixedTp as number)) {
+   361→   960→            data[i].tp = data[i].close - data[i].close * (marketSettings.shortFixedTp as number / 100)
+   362→   961→          } else {
+   363→   962→            data[i].tp = data[i].close - atr[i] * (marketSettings.tpShortMult || 24)
+   364→   963→          }
+   365→   964→          if (marketSettings.shortFixedSl !== null && !isNaN(marketSettings.shortFixedSl as number)) {
+   366→   965→            data[i].sl = data[i].close + data[i].close * (marketSettings.shortFixedSl as number / 100)
+   367→   966→          } else {
+   368→   967→            data[i].sl = data[i].close + atr[i] * (marketSettings.slShortMult || 4)
+   369→   968→          }
+   370→   969→          data[i].clientOrderId = generateOrderId(data[i].timestamp, symbol.name)
+   371→   970→          signals.push({
+   372→   971→            type: 'Short',
+   373→   972→            timestamp: data[i].timestamp,
+   374→   973→            price: data[i].close,
+   375→   974→            tp: data[i].tp as number,
+   376→   975→            sl: data[i].sl as number,
+   377→   976→            orderId: data[i].clientOrderId as string,
+   378→   977→            symbol: symbol.name,
+   379→   978→            // ✓ مورد ۶: candle index — used by min-same-direction-candles risk control
+   380→   979→            candleIndex: i
+   381→   980→          })
+   382→   981→        }
+   383→   982→      }
+   384→   983→    }
+   385→   984→
+   386→   985→    log(`${symbol.name}: ${signals.length} سیگنال تولید شد`, 'info', symbol.name)
+   387→   986→
+   388→   987→    if (signals.length === 0) {
+   389→   988→      log(`${symbol.name}: هیچ سیگنالی یافت نشد - شرایط بازار مناسب نیست`, 'warning', symbol.name)
+   390→   989→      updateSymbolStateInMemory({ status: 'waiting' })
+   391→   990→      return {
+   392→   991→        success: false,
+   393→   992→        symbol: symbol.name,
+   394→   993→        action: 'no_signal',
+   395→   994→        logs,
+   396→   995→        errorCount: 0,
+   397→   996→        duration: Date.now() - startTime,
+   398→   997→        symbols
+   399→   998→      }
+   400→   999→    }
+   401→  1000→
+   402→  1001→    // -------------------------------------------------------------------
+   403→  1002→    // Step 5: fetchPositionHistory()
+   404→  1003→    // -------------------------------------------------------------------
+   405→  1004→    log(`${symbol.name}: دریافت تاریخچه معاملات...`, 'info', symbol.name)
+   406→  1005→    const apiKey = marketSettings.apiKey
+   407→  1006→    const secretKey = marketSettings.secretKey
+   408→  1007→    const toobitBaseUrl = marketSettings.baseUrl || 'https://api.toobit.com'
+   409→  1008→
+   410→  1009→    let currentSymbolHistory: HistoryEntry[] = []
+   411→  1010→    if (apiKey && secretKey) {
+   412→  1011→      try {
+   413→  1012→        const historyResponse = await fetch(`${baseUrl}/api/history`, {
+   414→  1013→          method: 'POST',
+   415→  1014→          headers: { 'Content-Type': 'application/json' },
+   416→  1015→          body: JSON.stringify({
+   417→  1016→            symbol: fullSymbol,
+   418→  1017→            apiKey,
+   419→  1018→            secretKey,
+   420→  1019→            baseUrl: toobitBaseUrl,
+   421→  1020→            limit: 100
+   422→  1021→          })
+   423→  1022→        })
+   424→  1023→        if (historyResponse.ok) {
+   425→  1024→          const historyData = await historyResponse.json()
+   426→  1025→          let histories: unknown[] = []
+   427→  1026→          if (Array.isArray(historyData)) {
+   428→  1027→            histories = historyData
+   429→  1028→          } else if (historyData.data && Array.isArray(historyData.data)) {
+   430→  1029→            histories = historyData.data
+   431→  1030→          } else if (historyData.result && Array.isArray(historyData.result)) {
+   432→  1031→            histories = historyData.result
+   433→  1032→          } else if (typeof historyData === 'object' && historyData !== null) {
+   434→  1033→            const values = Object.values(historyData).find((v) => Array.isArray(v))
+   435→  1034→            histories = values || []
+   436→  1035→          }
+   437→  1036→          currentSymbolHistory = (histories as Record<string, unknown>[]).map((item) => ({
+   438→  1037→            time: new Date(parseInt(String(item.time || 0))),
+   439→  1038→            symbol: String(item.symbol || '-'),
+   440→  1039→            price: parseFloat(String(item.price || 0)),
+   441→  1040→            qty: parseFloat(String(item.qty || 0)),
+   442→  1041→            commission: parseFloat(String(item.commission || 0)),
+   443→  1042→            side: String(item.side || '-'),
+   444→  1043→            realizedPnl: parseFloat(String(item.realizedPnl || 0))
+   445→  1044→          }))
+   446→  1045→        }
+   447→  1046→      } catch (e) {
+   448→  1047→        log(`${symbol.name}: خطا در دریافت تاریخچه - ${e instanceof Error ? e.message : 'unknown'}`, 'warning', symbol.name)
+   449→  1048→      }
+   450→  1049→    }
+   451→  1050→    log(`${symbol.name}: ${currentSymbolHistory.length} معامله یافت شد`, 'success', symbol.name)
+   452→  1051→
+   453→  1052→    // -------------------------------------------------------------------
+   454→  1053→    // Step 6: updateSelectedSignal() — only latest signal with "در انتظار" status
+   455→  1054→    // -------------------------------------------------------------------
+   456→  1055→    // calculateSignalStatus — ✓ includes signal expiration logic (مورد ۴)
+   457→  1056→    const isSignalExpired = (signal: Signal): boolean => {
+   458→  1057→      if (!signal || !signal.timestamp) return false
+   459→  1058→      const signalTime = signal.timestamp instanceof Date
+   460→  1059→        ? signal.timestamp.getTime()
+   461→  1060→        : new Date(signal.timestamp).getTime()
+   462→  1061→      const now = Date.now()
+   463→  1062→      const expirationMs = (automationSettings.signalExpirationHours || 6) * 60 * 60 * 1000
+   464→  1063→      return (now - signalTime) > expirationMs
+   465→  1064→    }
+   466→  1065→
+   467→  1066→    const calculateSignalStatus = (signal: Signal): { text: string } => {
+   468→  1067→      if (!currentSymbolHistory || !Array.isArray(currentSymbolHistory)) {
+   469→  1068→        const isLatest = signals.indexOf(signal) === signals.length - 1
+   470→  1069→        // ✓ Check expiration even without history
+   471→  1070→        if (isLatest && isSignalExpired(signal)) {
+   472→  1071→          return { text: 'منقضی شده' }
+   473→  1072→        }
+   474→  1073→        return { text: isLatest ? 'در انتظار' : 'باز نشده' }
+   475→  1074→      }
+   476→  1075→      const signalDirection = signal.type === 'Long' ? 'BUY' : 'SELL'
+   477→  1076→      const openPositions = currentSymbolHistory.filter(
+   478→  1077→        (pos) => pos.side && pos.side.includes('OPEN') && pos.side.includes(signalDirection)
+   479→  1078→      )
+   480→  1079→      const currentIndex = signals.indexOf(signal)
+   481→  1080→      const nextSignal = currentIndex < signals.length - 1 ? signals[currentIndex + 1] : null
+   482→  1081→      const currentTime = signal.timestamp.getTime()
+   483→  1082→      const nextTime = nextSignal ? nextSignal.timestamp.getTime() : Infinity
+   484→  1083→      const matchingPositions = openPositions.filter((pos) => {
+   485→  1084→        const posTime = pos.time.getTime()
+   486→  1085→        return posTime >= currentTime && posTime < nextTime
+   487→  1086→      })
+   488→  1087→      if (matchingPositions.length === 0) {
+   489→  1088→        const isLatest = currentIndex === signals.length - 1
+   490→  1089→        // ✓ Check if signal is expired (مورد ۴)
+   491→  1090→        if (isLatest && isSignalExpired(signal)) {
+   492→  1091→          return { text: 'منقضی شده' }
+   493→  1092→        }
+   494→  1093→        return { text: isLatest ? 'در انتظار' : 'باز نشده' }
+   495→  1094→      }
+   496→  1095→      return { text: 'باز شده' }
+   497→  1096→    }
+   498→  1097→
+   499→  1098→    const latestSignal = signals[signals.length - 1]
+   500→  1099→    const status = calculateSignalStatus(latestSignal)
+   501→  1100→    // ✓ Expired signals are NOT selected — they can't be traded
+   502→  1101→    const selectedSignal = status.text === 'در انتظار' ? latestSignal : null
+   503→  1102→
+   504→  1103→    if (!selectedSignal) {
+   505→  1104→      if (status.text === 'منقضی شده') {
+   506→  1105→        log(`${symbol.name}: سیگنال منقضی شده است (بیش از ${automationSettings.signalExpirationHours} ساعت از صدور گذشته) - از این نماد عبور میشود`, 'warning', symbol.name)
+   507→  1106→      } else {
+   508→  1107→        log(`${symbol.name}: هیچ سیگنالی برای ورود آماده نیست - از این نماد عبو میشود`, 'warning', symbol.name)
+   509→  1108→      }
+   510→  1109→      updateSymbolStateInMemory({ status: 'waiting' })
+   511→  1110→      return {
+   512→  1111→        success: false,
+   513→  1112→        symbol: symbol.name,
+   514→  1113→        action: 'no_signal',
+   515→  1114→        logs,
+   516→  1115→        errorCount: 0,
+   517→  1116→        duration: Date.now() - startTime,
+   518→  1117→        symbols
+   519→  1118→      }
+   520→  1119→    }
+   521→  1120→
+   522→  1121→    log(`${symbol.name}: سیگنال آماده ورود - ${selectedSignal.type}`, 'success', symbol.name)
+   523→  1122→
+   524→  1123→    // ✓ Phase 17: Direction-specific risk control params (fall back to legacy with ??)
+   525→  1124→    const isLongSignal = selectedSignal.type === 'Long'
+   526→  1125→    const effLeverage = isLongSignal
+   527→  1126→      ? (automationSettings.leverageLong ?? automationSettings.leverage)
+   528→  1127→      : (automationSettings.leverageShort ?? automationSettings.leverage)
+   529→  1128→    const effEntryMarginPercent = isLongSignal
+   530→  1129→      ? (automationSettings.entryMarginPercentLong ?? automationSettings.entryMarginPercent)
+   531→  1130→      : (automationSettings.entryMarginPercentShort ?? automationSettings.entryMarginPercent)
+   532→  1131→    const effMinPriceDistancePercent = isLongSignal
+   533→  1132→      ? (automationSettings.minPriceDistancePercentLong ?? automationSettings.minPriceDistancePercent)
+   534→  1133→      : (automationSettings.minPriceDistancePercentShort ?? automationSettings.minPriceDistancePercent)
+   535→  1134→
+   536→  1135→    // -------------------------------------------------------------------
+   537→  1136→    // Step 7: fetchPrice()
+   538→  1137→    // -------------------------------------------------------------------
+   539→  1138→    log(`${symbol.name}: دریافت قیمت...`, 'info', symbol.name)
+   540→  1139→    const priceResponse = await fetch(
+   541→  1140→      `${baseUrl}/api/toobit-proxy?symbol=${encodeURIComponent(fullSymbol)}&interval=1h&limit=1`
+   542→  1141→    )
+   543→  1142→    if (!priceResponse.ok) throw new Error('Failed to fetch price')
+   544→  1143→    const priceData = await priceResponse.json()
+   545→  1144→    const klines = Array.isArray(priceData) ? priceData : priceData.data || []
+   546→  1145→    if (klines.length === 0) throw new Error('No price data received')
+   547→  1146→    const price = parseFloat(klines[0][4])
+   548→  1147→    log(`${symbol.name}: قیمت فعلی = ${price}`, 'success', symbol.name)
+   549→  1148→
+   550→  1149→    // -------------------------------------------------------------------
+   551→  1150→    // Step 8: closeOppositePositions()
+   552→  1151→    // -------------------------------------------------------------------
+   553→  1152→    log(`${symbol.name}: بررسی پوزیشن‌های مخالف...`, 'info', symbol.name)
+   554→  1153→    let closedCount = 0
+   555→  1154→    let closedPositionInfo: {
+   556→  1155→      symbol: string
+   557→  1156→      side: string
+   558→  1157→      leverage: number
+   559→  1158→      margin: number
+   560→  1159→      unrealizedPnL: number
+   561→  1160→      profitRate: number
+   562→  1161→      avgPrice: number
+   563→  1162→      available: number
+   564→  1163→    } | null = null
+   565→  1164→
+   566→  1165→    if (apiKey && secretKey) {
+   567→  1166→      try {
+   568→  1167→        // First fetch open positions to find the opposite one's details
+   569→  1168→        const posResponse = await fetch(`${baseUrl}/api/open-positions`, {
+   570→  1169→          headers: {
+   571→  1170→            'X-API-Key': apiKey,
+   572→  1171→            'X-Secret-Key': secretKey,
+   573→  1172→            'X-Base-Url': toobitBaseUrl
+   574→  1173→          }
+   575→  1174→        })
+   576→  1175→        if (posResponse.ok) {
+   577→  1176→          const posResult = await posResponse.json()
+   578→  1177→          const allPositions = posResult.positions || posResult.data || []
+   579→  1178→          const oppositeDirection = selectedSignal.type === 'Long' ? 'short' : 'long'
+   580→  1179→          const targetSide = oppositeDirection.toUpperCase()
+   581→  1180→          const matchingPos = (allPositions as Record<string, unknown>[]).find((pos) => {
+   582→  1181→            const posSymbol = String(pos.symbol || '').toUpperCase()
+   583→  1182→            const side = String(pos.side || '').toUpperCase()
+   584→  1183→            const available = parseFloat(String(pos.available || pos.position || 0))
+   585→  1184→            return posSymbol === fullSymbol.toUpperCase() && side === targetSide && available > 0
+   586→  1185→          })
+   587→  1186→          if (matchingPos) {
+   588→  1187→            const margin = parseFloat(String(matchingPos.margin || 0))
+   589→  1188→            const unrealizedPnL = parseFloat(String(matchingPos.unrealizedPnL || 0))
+   590→  1189→            const profitRate = parseFloat(String(matchingPos.profitRate || 0)) * 100
+   591→  1190→            closedPositionInfo = {
+   592→  1191→              symbol: String(matchingPos.symbol || ''),
+   593→  1192→              side: String(matchingPos.side || ''),
+   594→  1193→              leverage: parseInt(String(matchingPos.leverage || 1)),
+   595→  1194→              margin,
+   596→  1195→              unrealizedPnL,
+   597→  1196→              profitRate,
+   598→  1197→              avgPrice: parseFloat(String(matchingPos.avgPrice || 0)),
+   599→  1198→              available: parseFloat(String(matchingPos.available || 0))
+   600→  1199→            }
+   601→  1200→          }
+   602→  1201→        }
+   603→  1202→
+   604→  1203→        // Close the opposite position
+   605→  1204→        const oppositeDir = selectedSignal.type === 'Long' ? 'short' : 'long'
+   606→  1205→        const closeResponse = await fetch(`${baseUrl}/api/close-position`, {
+   607→  1206→          method: 'POST',
+   608→  1207→          headers: { 'Content-Type': 'application/json' },
+   609→  1208→          body: JSON.stringify({
+   610→  1209→            symbol: symbol.name,
+   611→  1210→            direction: oppositeDir,
+   612→  1211→            clientOrderId: `${symbol.name}_close_${Date.now()}`,
+   613→  1212→            settings: { apiKey, secretKey, baseUrl: toobitBaseUrl }
+   614→  1213→          })
+   615→  1214→        })
+   616→  1215→        if (closeResponse.ok) {
+   617→  1216→          const closeData = await closeResponse.json()
+   618→  1217→          closedCount = closeData.closed || 0
+   619→  1218→        }
+   620→  1219→      } catch (e) {
+   621→  1220→        log(`${symbol.name}: خطا در بستن پوزیشن مخالف - ${e instanceof Error ? e.message : 'unknown'}`, 'warning', symbol.name)
+   622→  1221→      }
+   623→  1222→    }
+   624→  1223→    if (closedCount > 0) {
+   625→  1224→      log(`${symbol.name}: ${closedCount} پوزیشن مخالف بسته شد`, 'success', symbol.name)
+   626→  1225→    } else {
+   627→  1226→      log(`${symbol.name}: پوزیشن مخالفی یافت نشد`, 'info', symbol.name)
+   628→  1227→    }
+   629→  1228→
+   630→  1229→    // ===================================================================
+   631→  1230→    // ✓ مورد ۶: Min Same-Direction Candles Control
+   632→  1231→    //   When minSameDirectionCandles > 0, check that the N candles AFTER
+   633→  1232→    //   the signal candle are all the same direction as the signal:
+   634→  1233→    //     - Long signal  → all N candles must be GREEN (close > open)
+   635→  1234→    //     - Short signal → all N candles must be RED   (close < open)
+   636→  1235→    //   If NOT enough candles exist after the signal (signal too recent)
+   637→  1236→    //   → REJECT (wait for more candles to form).
+   638→  1237→    //   If even one candle is opposite → REJECT.
+   639→  1238→    //   Placement: AFTER closeOppositePositions (step 8) and BEFORE step 9
+   640→  1239→    //   (refresh history). This control only blocks position OPENING.
+   641→  1240→    // ===================================================================
+   642→  1241→    const minSameDir = automationSettings.minSameDirectionCandles || 0
+   643→  1242→    if (minSameDir > 0) {
+   644→  1243→      const sigIdx = typeof selectedSignal.candleIndex === 'number' ? selectedSignal.candleIndex : -1
+   645→  1244→      if (sigIdx < 0) {
+   646→  1245→        // Should not happen — but guard anyway
+   647→  1246→        log(`${symbol.name}: شماره کندل سیگنال نامشخص — کنترل کندل هم‌جهت skip شد`, 'warning', symbol.name)
+   648→  1247→      } else {
+   649→  1248→        const candlesAfterSignal = data.length - sigIdx - 1
+   650→  1249→        if (candlesAfterSignal < minSameDir) {
+   651→
+   652→[showing lines 600-1249 of 2172; use offset=1250 with limit to continue reading]
