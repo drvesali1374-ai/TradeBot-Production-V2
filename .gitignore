@@ -40,15 +40,18 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-local-*
 .claude
 .z-ai-config
 *.log
 dev.log
 dev.out.log
-test
 prompt
 
 server.log
 # Skills directory
 /skills/
+
+# internal tooling artifacts (cached source reads — not project source)
+/tool-results/
+.zscripts/dev.pid
+.zscripts/dev.log
