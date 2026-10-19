@@ -1418,3 +1418,19 @@ Stage Summary:
 - فایل ساخته‌شده: src/server/storage/local-adapter.ts — تنها فایل تغییریافته؛ هیچ رگرسیونی در بقیه پروژه
 - پیشنمایش کاربر کاملاً بازیابی شد: صفحه اصلی 200، ورود، داشبورد، چرخه معاملاتی، بودجه ذخیره‌سازی و همه APIها سالم
 - نکته: اعتبارنامه ورود فعلی admin/admin123 است (در حافظه پایدار از تست قبلی؛ با صفحه تنظیمات قابل تغییر)
+
+---
+Task ID: fix-instability + github-repo
+Agent: main-orchestrator
+Task: ریشه‌یابی ناپایداری خطای local-adapter + ساخت repo عمومی TradeBot-Production-V2
+
+Work Log:
+- ریشه‌یابی حذف مکرر: .gitignore خط ۴۳ الگوی `local-*` داشت → src/server/storage/local-adapter.ts از همه‌ی checkpoint های خودکار سندباکس (commit های UUID در 21:36 و 02:35) مستثنا می‌شد؛ هر restore/ری‌بوت سندباکس (آخرین: امروز 05:51 — مطابق mtime پوشه) فایل را پاک می‌کرد → خطای Module not found بازمی‌گشت. فایل track شده (مثل kv-adapter.ts از 21:25) جان سالم می‌برد.
+- رفع ریشه‌ای: حذف الگوی `local-*` (و `test`) از .gitignore؛ بازسازی local-adapter.ts با کامنت هشدار ماندگاری؛ commit واقعی (f2262c7) → از این پس فایل در checkpoint ها هست و restore ها آن را نگه می‌دارند.
+- پاک‌سازی: untrack شد tool-results/ (۱۶ فایل آرتیفکت داخلی) و .zscripts/dev.pid؛ الگوهایشان به .gitignore اضافه شد.
+- راستی‌آزمایی: /api/auth/verify → 401 درست، GET / → 200، ورود admin/admin123 ✓، چرخه از UI → ۳۱ خواندن/۴ نوشتن، JSON سالم ✓، صفر خطای کنسول.
+- README.md جامع (فارسی) برای repo ساخته شد: امکانات، راه‌اندازی، متغیرهای env، ساختار، استقرار Cloudflare، لینک مستندات.
+
+Stage Summary:
+- ناپایداری به‌طور ریشه‌ای حل شد (نه فقط علامت‌زدایی): الگوی خطرناک gitignore حذف + فایل committed → از این پس restart سندباکس خطا را بازنمی‌گرداند
+- repo عمومی github.com/<owner>/TradeBot-Production-V2 با کل سورس push شد (تاریخ commit های checkpoint سندباکس حفظ شد)
