@@ -1040,6 +1040,16 @@ input[type='checkbox'] { accent-color: var(--accent); width: 16px; height: 16px;
   inset: 0;
   pointer-events: auto;
 }
+/* drawing hover/drag cursor feedback (driven by JS via data-dhover) */
+.chart-wrap[data-dhover='handle'] * {
+  cursor: grab !important;
+}
+.chart-wrap[data-dhover='body'] * {
+  cursor: pointer !important;
+}
+.chart-wrap[data-dhover='drag'] * {
+  cursor: grabbing !important;
+}
 .chart-toolbar {
   display: flex;
   gap: 6px;

@@ -11,7 +11,7 @@
  *   (re-reads CSS variables when data-theme flips), fully RTL layout.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { MouseEvent as ReactMouseEvent } from 'react'
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import {
   CandlestickSeries,
   HistogramSeries,
@@ -41,9 +41,11 @@ import {
   chartOptionsFor,
   readPalette,
 } from './chartTheme'
-import { renderDrawing, type OverlayRenderInput } from './drawingRender'
+import { renderDrawing, hitTestDrawing, type AnchorWhich, type DrawingHit, type OverlayRenderInput } from './drawingRender'
 import {
+  DRAW_COLORS,
   INTERVAL_MS,
+  SYMBOLS,
   type AnalysisResponse,
   type Candle,
   type Drawing,
@@ -104,6 +106,21 @@ function snapBarTimeSec(candles: Candle[], targetMs: number, intervalMs: number)
   return Math.floor(candles[ans].openTime / 1000)
 }
 
+/** Active drawing-drag session. */
+interface DragState {
+  id: number
+  kind: DrawingHit['kind']
+  which?: AnchorWhich
+  /** logical anchors under the grab point at drag start */
+  startT: number
+  startP: number
+  /** pre-drag copy for Esc-cancel */
+  snapshot: Drawing
+}
+
+const CUSTOM_SYMBOLS_KEY = 'tradebot.chart.customSymbols'
+const CUSTOM_SYMBOL_RE = /^[A-Z0-9]{2,16}$/
+
 /* ------------------------------------------------------------------ */
 /* Component                                                           */
 /* ------------------------------------------------------------------ */
@@ -123,6 +140,8 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
   const [drawings, setDrawings] = useState<Drawing[]>([])
   const [hoverCandle, setHoverCandle] = useState<Candle | null>(null)
   const [signalState, setSignalState] = useState<SignalState | null>(null)
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [customSymbols, setCustomSymbols] = useState<string[]>([])
 
   /* ——— refs (imperative chart world) ——— */
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -146,6 +165,10 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
   const nextIdRef = useRef(1)
   const onSymbolChangeRef = useRef(onSymbolChange)
   const prevTickRef = useRef<number | null>(null)
+  const selectedIdRef = useRef<number | null>(null)
+  const lastColorRef = useRef<string | null>(null)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
+  const dragRef = useRef<DragState | null>(null)
 
   useEffect(() => {
     onSymbolChangeRef.current = onSymbolChange
@@ -155,15 +178,30 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
   /* Overlay rendering (logical → pixel on every chart redraw)        */
   /* ---------------------------------------------------------------- */
 
-  const redrawOverlay = useCallback(() => {
+  const buildOverlayInput = useCallback((): OverlayRenderInput | null => {
     const canvas = overlayRef.current
     const chart = chartRef.current
     const series = candleRef.current
-    if (!canvas || !chart || !series) return
+    if (!canvas || !chart || !series) return null
+    const ts = chart.timeScale()
+    return {
+      w: canvas.clientWidth,
+      h: canvas.clientHeight,
+      xOfTime: (t) => ts.timeToCoordinate(t as UTCTimestamp),
+      yOfPrice: (p) => series.priceToCoordinate(p),
+      palette: readPalette(),
+      intervalMs: intervalMsRef.current,
+      selectedId: selectedIdRef.current,
+    }
+  }, [])
+
+  const redrawOverlay = useCallback(() => {
+    const canvas = overlayRef.current
+    const input = buildOverlayInput()
+    if (!canvas || !input) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    const w = canvas.clientWidth
-    const h = canvas.clientHeight
+    const { w, h } = input
     if (w < 2 || h < 2) return
 
     const dpr = window.devicePixelRatio || 1
@@ -176,19 +214,41 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.clearRect(0, 0, w, h)
 
-    const ts = chart.timeScale()
-    const input: OverlayRenderInput = {
-      w,
-      h,
-      xOfTime: (t) => ts.timeToCoordinate(t as UTCTimestamp),
-      yOfPrice: (p) => series.priceToCoordinate(p),
-      palette: readPalette(),
-      intervalMs: intervalMsRef.current,
-    }
     for (const d of drawingsRef.current) renderDrawing(ctx, input, d)
     const draft = draftRef.current
     if (draft) renderDrawing(ctx, { ...input, isPreview: true }, draft)
-  }, [])
+  }, [buildOverlayInput])
+
+  /**
+   * Wrap-relative (x,y) → logical anchors (bar time + price). With `magnet`,
+   * the price snaps to the hovered candle's high/low wick when within ~8px —
+   * TradingView-style precision so wick-tip measurements register the exact
+   * wick price instead of a few-pixels-off value.
+   */
+  const pointAt = useCallback(
+    (x: number, y: number, magnet: boolean): { t: number | null; price: number | null } => {
+      const chart = chartRef.current
+      const series = candleRef.current
+      if (!chart || !series) return { t: null, price: null }
+      const tRaw = chart.timeScale().coordinateToTime(x)
+      const t = typeof tRaw === 'number' ? tRaw : null
+      let price: number | null = series.coordinateToPrice(y)
+      if (magnet && t != null) {
+        const c = candlesByTimeRef.current.get(t)
+        if (c && price != null) {
+          for (const wick of [c.high, c.low]) {
+            const wy = series.priceToCoordinate(wick)
+            if (wy != null && Math.abs(wy - y) <= 8) {
+              price = wick
+              break
+            }
+          }
+        }
+      }
+      return { t, price }
+    },
+    [],
+  )
 
   /**
    * Signature of everything that affects overlay geometry (visible logical
@@ -552,75 +612,314 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
       const chart = chartRef.current
       const series = candleRef.current
       if (!chart || !series || candlesRef.current.length === 0) return
-      if (tool === 'none') return
+      if (tool === 'none') return // selection handled at the wrap level
       const x = e.nativeEvent.offsetX
       const y = e.nativeEvent.offsetY
-      const timeAt = (): number | null => {
-        const t = chart.timeScale().coordinateToTime(x)
-        return typeof t === 'number' ? t : null
-      }
-      const priceAt = (): number | null => series.coordinateToPrice(y)
 
       if (tool === 'hline') {
-        const price = priceAt()
+        const { price } = pointAt(x, y, true)
         if (price == null) return
-        pushDrawing({ type: 'hline', price1: price, time1: 0, price2: price, time2: 0 })
+        pushDrawing({
+          type: 'hline', price1: price, time1: 0, price2: price, time2: 0,
+          color: lastColorRef.current ?? undefined,
+        })
         setTool('none')
       } else if (tool === 'vline') {
-        const t = timeAt()
+        const { t } = pointAt(x, y, false)
         if (t == null) return
-        pushDrawing({ type: 'vline', time1: t, price1: 0, time2: t, price2: 0 })
+        pushDrawing({
+          type: 'vline', time1: t, price1: 0, time2: t, price2: 0,
+          color: lastColorRef.current ?? undefined,
+        })
         setTool('none')
       } else if (tool === 'trend' || tool === 'rect' || tool === 'measure') {
+        const { t, price } = pointAt(x, y, true)
         const draft = draftRef.current
         if (!draft) {
-          const price = priceAt()
-          const t = timeAt()
           if (price == null || t == null) return
           draftRef.current = { type: tool, time1: t, price1: price, time2: t, price2: price }
         } else {
-          const price = priceAt()
-          const t = timeAt()
           if (price == null || t == null) return
+          const { type, time1, price1 } = draft
           draftRef.current = null
-          pushDrawing({ type: draft.type, time1: draft.time1, price1: draft.price1, time2: t, price2: price })
+          pushDrawing({
+            type, time1, price1, time2: t, price2: price,
+            color: lastColorRef.current ?? undefined,
+          })
           setTool('none')
         }
       }
       redrawOverlay()
     },
-    [tool, pushDrawing, redrawOverlay],
+    [tool, pushDrawing, redrawOverlay, pointAt],
   )
 
   const onOverlayMove = useCallback(
     (e: ReactMouseEvent<HTMLCanvasElement>) => {
       const draft = draftRef.current
       if (!draft) return
-      const chart = chartRef.current
-      const series = candleRef.current
-      if (!chart || !series) return
-      const t = chart.timeScale().coordinateToTime(e.nativeEvent.offsetX)
-      const price = series.coordinateToPrice(e.nativeEvent.offsetY)
+      const { t, price } = pointAt(e.nativeEvent.offsetX, e.nativeEvent.offsetY, true)
       if (price != null) draft.price2 = price
-      if (typeof t === 'number') draft.time2 = t
+      if (t != null) draft.time2 = t
       redrawOverlay()
     },
-    [redrawOverlay],
+    [redrawOverlay, pointAt],
   )
 
-  // Escape cancels the in-progress drawing
-  useEffect(() => {
-    if (tool === 'none') return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        draftRef.current = null
-        setTool('none')
+  /* ---------------------------------------------------------------- */
+  /* Selection & editing (tool === 'none')                             */
+  /* ---------------------------------------------------------------- */
+
+  // always-fresh indirection so window listeners stay stable per drag
+  const dragMoveRef = useRef<(ev: PointerEvent) => void>(() => {})
+  const dragUpRef = useRef<(ev: PointerEvent) => void>(() => {})
+  const moveProxy = useCallback((ev: PointerEvent) => dragMoveRef.current(ev), [])
+  const upProxy = useCallback((ev: PointerEvent) => dragUpRef.current(ev), [])
+
+  const endDrag = useCallback(
+    (cancel: boolean) => {
+      const drag = dragRef.current
+      dragRef.current = null
+      window.removeEventListener('pointermove', moveProxy)
+      window.removeEventListener('pointerup', upProxy)
+      const wrap = wrapRef.current
+      if (wrap) {
+        wrap.style.cursor = ''
+        delete wrap.dataset.dhover
+      }
+      if (!drag) return
+      if (cancel) {
+        const target = drawingsRef.current.find((d) => d.id === drag.id)
+        if (target) Object.assign(target, drag.snapshot)
+        drawingsRevRef.current++
         redrawOverlay()
+      }
+      setDrawings([...drawingsRef.current])
+    },
+    [moveProxy, upProxy, redrawOverlay],
+  )
+
+  const onDragMove = useCallback(
+    (ev: PointerEvent) => {
+      const drag = dragRef.current
+      const wrap = wrapRef.current
+      const input = buildOverlayInput()
+      if (!drag || !wrap || !input) return
+      const rect = wrap.getBoundingClientRect()
+      const { t, price } = pointAt(
+        ev.clientX - rect.left,
+        ev.clientY - rect.top,
+        drag.kind === 'handle', // magnet while dragging a node, raw for body moves
+      )
+      if (t == null && price == null) return
+      const target = drawingsRef.current.find((d) => d.id === drag.id)
+      if (!target) return
+      const snap = drag.snapshot
+      const curT = t ?? drag.startT
+      const curP = price ?? drag.startP
+      if (drag.kind === 'handle' && drag.which) {
+        switch (drag.which) {
+          case 'p1':
+          case 'tl':
+            target.time1 = curT
+            target.price1 = curP
+            break
+          case 'p2':
+          case 'br':
+            target.time2 = curT
+            target.price2 = curP
+            break
+          case 'bl':
+            target.time1 = curT
+            target.price2 = curP
+            break
+          case 'tr':
+            target.time2 = curT
+            target.price1 = curP
+            break
+        }
+      } else if (target.type === 'hline') {
+        const dp = curP - drag.startP
+        target.price1 = snap.price1 + dp
+        target.price2 = snap.price1 + dp
+      } else if (target.type === 'vline') {
+        const dt = curT - drag.startT
+        target.time1 = snap.time1 + dt
+        target.time2 = snap.time1 + dt
+      } else {
+        const dt = curT - drag.startT
+        const dp = curP - drag.startP
+        target.time1 = snap.time1 + dt
+        target.time2 = snap.time2 + dt
+        target.price1 = snap.price1 + dp
+        target.price2 = snap.price2 + dp
+      }
+      drawingsRevRef.current++
+      redrawOverlay()
+    },
+    [buildOverlayInput, pointAt, redrawOverlay],
+  )
+
+  const onDragUp = useCallback(
+    () => {
+      endDrag(false)
+    },
+    [endDrag],
+  )
+
+  useEffect(() => {
+    dragMoveRef.current = onDragMove
+    dragUpRef.current = onDragUp
+  }, [onDragMove, onDragUp])
+
+  const onWrapPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      if (tool !== 'none' || !wrapRef.current) return
+      // clicks on in-chart UI (editor popover) never hit-test drawings
+      const el = e.target as HTMLElement | null
+      if (el && typeof el.closest === 'function' && el.closest('[data-chart-ui]')) return
+      const rect = wrapRef.current.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const y = e.clientY - rect.top
+      const input = buildOverlayInput()
+      if (!input) return
+      const list = drawingsRef.current
+      for (let i = list.length - 1; i >= 0; i--) {
+        const hit = hitTestDrawing(input, list[i], x, y)
+        if (hit) {
+          // block the chart's own pointer handlers (pan) for this gesture
+          e.stopPropagation()
+          e.preventDefault()
+          selectedIdRef.current = list[i].id
+          setSelectedId(list[i].id)
+          const { t, price } = pointAt(x, y, hit.kind === 'handle')
+          dragRef.current = {
+            id: list[i].id,
+            kind: hit.kind,
+            which: hit.kind === 'handle' ? hit.which : undefined,
+            startT: t ?? list[i].time1,
+            startP: price ?? list[i].price1,
+            snapshot: { ...list[i] },
+          }
+          wrapRef.current.dataset.dhover = 'drag'
+          window.addEventListener('pointermove', moveProxy)
+          window.addEventListener('pointerup', upProxy)
+          return
+        }
+      }
+      // empty spot → deselect
+      if (selectedIdRef.current != null) {
+        selectedIdRef.current = null
+        setSelectedId(null)
+      }
+    },
+    [tool, buildOverlayInput, pointAt, moveProxy, upProxy],
+  )
+
+  const onWrapMouseMove = useCallback(
+    (e: ReactMouseEvent<HTMLDivElement>) => {
+      const wrap = wrapRef.current
+      if (!wrap) return
+      if (tool !== 'none' || dragRef.current) return
+      const rect = wrap.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const y = e.clientY - rect.top
+      const input = buildOverlayInput()
+      if (!input) {
+        delete wrap.dataset.dhover
+        return
+      }
+      const list = drawingsRef.current
+      let hover: 'handle' | 'body' | '' = ''
+      for (let i = list.length - 1; i >= 0; i--) {
+        const hit = hitTestDrawing(input, list[i], x, y)
+        if (hit) {
+          hover = hit.kind === 'handle' ? 'handle' : 'body'
+          break
+        }
+      }
+      if (hover) wrap.dataset.dhover = hover
+      else delete wrap.dataset.dhover
+    },
+    [tool, buildOverlayInput],
+  )
+
+  const applySelectedColor = useCallback((c: string) => {
+    const id = selectedIdRef.current
+    if (id == null) return
+    lastColorRef.current = c
+    setDrawings((prev) => prev.map((d) => (d.id === id ? { ...d, color: c } : d)))
+  }, [])
+
+  const deleteSelected = useCallback(() => {
+    const id = selectedIdRef.current
+    if (id == null) return
+    selectedIdRef.current = null
+    setSelectedId(null)
+    setDrawings((prev) => prev.filter((d) => d.id !== id))
+  }, [])
+
+  // selection → overlay styling refresh
+  useEffect(() => {
+    selectedIdRef.current = selectedId
+    drawingsRevRef.current++
+    redrawOverlay()
+  }, [selectedId, redrawOverlay])
+
+  // dev-only debug/E2E hook — exposes chart coordinate accessors (no secrets)
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'development') return
+    const w = window as unknown as { __tbChart?: Record<string, unknown> }
+    w.__tbChart = {
+      priceToCoordinate: (p: number) => candleRef.current?.priceToCoordinate(p) ?? null,
+      coordinateToPrice: (y: number) => candleRef.current?.coordinateToPrice(y) ?? null,
+      timeToCoordinate: (t: number) =>
+        chartRef.current?.timeScale().timeToCoordinate(t as UTCTimestamp) ?? null,
+      coordinateToTime: (x: number) => {
+        const r = chartRef.current?.timeScale().coordinateToTime(x)
+        return typeof r === 'number' ? r : null
+      },
+      candleAt: (tSec: number) => candlesByTimeRef.current.get(tSec) ?? null,
+      candles: () => candlesRef.current,
+      drawings: () => drawingsRef.current,
+    }
+    return () => {
+      delete w.__tbChart
+    }
+  }, [])
+
+  // Escape: cancel drag / cancel draft / deselect · Delete: remove selected
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null
+      const typing =
+        !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
+      if (e.key === 'Escape') {
+        if (dragRef.current) {
+          endDrag(true)
+          return
+        }
+        if (tool !== 'none') {
+          draftRef.current = null
+          setTool('none')
+          redrawOverlay()
+          return
+        }
+        if (selectedIdRef.current != null) {
+          selectedIdRef.current = null
+          setSelectedId(null)
+        }
+        return
+      }
+      if (typing) return
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIdRef.current != null) {
+        e.preventDefault()
+        deleteSelected()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [tool, redrawOverlay])
+  }, [tool, redrawOverlay, endDrag, deleteSelected])
 
   /* ---------------------------------------------------------------- */
   /* Toolbar callbacks                                                 */
@@ -636,7 +935,59 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
     setInterval(i)
   }, [])
 
+  const handleToolChange = useCallback((t: DrawingToolId) => {
+    draftRef.current = null
+    if (selectedIdRef.current != null) {
+      selectedIdRef.current = null
+      setSelectedId(null)
+    }
+    setTool(t)
+  }, [])
+
   const handleRefresh = useCallback(() => setReloadKey((k) => k + 1), [])
+
+  /* ---------------------------------------------------------------- */
+  /* User-defined custom symbols (persisted in localStorage)          */
+  /* ---------------------------------------------------------------- */
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(CUSTOM_SYMBOLS_KEY)
+      if (!raw) return
+      const arr: unknown = JSON.parse(raw)
+      if (!Array.isArray(arr)) return
+      setCustomSymbols(
+        arr
+          .filter(
+            (s): s is string =>
+              typeof s === 'string' && CUSTOM_SYMBOL_RE.test(s) && !SYMBOLS.includes(s),
+          )
+          .slice(0, 16),
+      )
+    } catch {
+      /* corrupted → ignore */
+    }
+  }, [])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CUSTOM_SYMBOLS_KEY, JSON.stringify(customSymbols))
+    } catch {
+      /* storage unavailable — session-only symbols */
+    }
+  }, [customSymbols])
+
+  const handleAddSymbol = useCallback(
+    (s: string) => {
+      setCustomSymbols((prev) => (prev.includes(s) ? prev : [...prev, s].slice(0, 16)))
+      handleSymbolChange(s) // load & switch immediately
+    },
+    [handleSymbolChange],
+  )
+
+  const handleRemoveSymbol = useCallback((s: string) => {
+    setCustomSymbols((prev) => prev.filter((x) => x !== s))
+  }, [])
 
   const deleteLastDrawing = useCallback(() => {
     draftRef.current = null
@@ -663,6 +1014,8 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
           ? 'var(--success)'
           : 'var(--text-primary)'
 
+  const selectedDrawing = selectedId != null ? drawings.find((d) => d.id === selectedId) ?? null : null
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0 }}>
       <ChartToolbar
@@ -671,7 +1024,7 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
         interval={interval}
         onIntervalChange={handleIntervalChange}
         tool={tool}
-        onToolChange={setTool}
+        onToolChange={handleToolChange}
         loading={loading}
         onRefresh={handleRefresh}
         price={livePrice ?? lastClose}
@@ -681,9 +1034,18 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
         hasDrawings={drawings.length > 0}
         onDeleteDrawing={deleteLastDrawing}
         onClearDrawings={clearDrawings}
+        customSymbols={customSymbols}
+        onAddSymbol={handleAddSymbol}
+        onRemoveSymbol={handleRemoveSymbol}
       />
 
-      <div className="chart-wrap" style={{ height: '65vh', minHeight: 420, flexShrink: 0 }}>
+      <div
+        ref={wrapRef}
+        className="chart-wrap"
+        style={{ height: '65vh', minHeight: 420, flexShrink: 0 }}
+        onPointerDownCapture={onWrapPointerDown}
+        onMouseMove={onWrapMouseMove}
+      >
         {/* lightweight-charts mounts here */}
         <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />
 
@@ -760,7 +1122,7 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
           ) : null}
         </div>
 
-        {/* signal legend panel */}
+        {/* signal legend panel — auto-sizes to its content (never clips) */}
         {showSignals && signalState && signalState.signals.length > 0 ? (
           <div
             style={{
@@ -770,7 +1132,9 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
               zIndex: 3,
               pointerEvents: 'none',
               direction: 'rtl',
-              width: 250,
+              width: 'max-content',
+              minWidth: 210,
+              maxWidth: 'min(360px, calc(100% - 24px))',
               padding: '8px 10px',
               borderRadius: 10,
               background: 'color-mix(in srgb, var(--bg-input) 84%, transparent)',
@@ -784,6 +1148,7 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
               style={{
                 display: 'flex',
                 alignItems: 'center',
+                flexWrap: 'wrap',
                 gap: 6,
                 marginBottom: 6,
                 color: 'var(--text-primary)',
@@ -802,7 +1167,7 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
                 </span>
               ) : null}
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 5, maxHeight: 158, overflowY: 'auto' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5, maxHeight: 168, overflowY: 'auto' }}>
               {signalState.signals
                 .slice(-6)
                 .reverse()
@@ -811,7 +1176,7 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
                   const isPending = signalState.pending?.id === s.id
                   const st = s.status ? SIGNAL_STATUS_META[s.status] : null
                   return (
-                    <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'space-between' }}>
+                    <div key={s.id} style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, rowGap: 2, justifyContent: 'space-between' }}>
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
                         <i
                           className={`ph ${isLong ? 'ph-trend-up' : 'ph-trend-down'}`}
@@ -841,7 +1206,82 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
           </div>
         ) : null}
 
-        {/* loading veil */}
+        {/* drawing editor — visible while a drawing is selected */}
+        {selectedDrawing && tool === 'none' ? (
+          <div
+            data-chart-ui
+            style={{
+              position: 'absolute',
+              top: 10,
+              right: 64,
+              zIndex: 6,
+              direction: 'rtl',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '7px 10px',
+              borderRadius: 10,
+              background: 'color-mix(in srgb, var(--bg-input) 92%, transparent)',
+              border: '1px solid var(--border-soft)',
+              backdropFilter: 'blur(6px)',
+              boxShadow: '0 4px 14px rgba(15, 23, 42, 0.08)',
+            }}
+          >
+            <i className="ph ph-paint-brush" style={{ color: 'var(--accent)', fontSize: 15 }} aria-hidden />
+            <span style={{ fontSize: 11, color: 'var(--text-primary)', fontWeight: 700, whiteSpace: 'nowrap' }}>
+              ویرایش رسم
+            </span>
+            <span style={{ display: 'inline-flex', gap: 5 }}>
+              {DRAW_COLORS.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => applySelectedColor(c)}
+                  aria-label={`رنگ ${c}`}
+                  data-tooltip={c}
+                  style={{
+                    width: 16,
+                    height: 16,
+                    borderRadius: '50%',
+                    background: c,
+                    cursor: 'pointer',
+                    border:
+                      selectedDrawing.color === c || (selectedDrawing.color == null && c === DRAW_COLORS[0])
+                        ? '2px solid var(--text-primary)'
+                        : '1px solid var(--border-color)',
+                    padding: 0,
+                  }}
+                />
+              ))}
+            </span>
+            <button
+              type="button"
+              className="tool-btn"
+              style={{ width: 26, height: 26, fontSize: 13, color: 'var(--danger)' }}
+              data-tooltip="حذف رسم انتخابی (Delete)"
+              aria-label="حذف رسم انتخابی"
+              onClick={deleteSelected}
+            >
+              <i className="ph ph-trash" aria-hidden />
+            </button>
+            <button
+              type="button"
+              className="tool-btn"
+              style={{ width: 26, height: 26, fontSize: 13 }}
+              data-tooltip="بستن ویرایشگر (Esc)"
+              aria-label="بستن ویرایشگر"
+              onClick={() => {
+                selectedIdRef.current = null
+                setSelectedId(null)
+              }}
+            >
+              <i className="ph ph-x" aria-hidden />
+            </button>
+            <span style={{ fontSize: 9.5, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+              گره‌ها را بکشید · Esc = لغو
+            </span>
+          </div>
+        ) : null}
         {loading ? (
           <div
             style={{
@@ -907,8 +1347,9 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
 
       <p className="form-hint" style={{ marginTop: -2 }}>
         <i className="ph ph-info" style={{ color: 'var(--accent)', verticalAlign: '-2px' }} aria-hidden />{' '}
-        برای رسم روی چارت یکی از ابزارها را انتخاب کنید (Esc = لغو رسم). رسم‌ها با جابه‌جایی و بزرگ‌نمایی چارت همراه
-        داده‌ها حرکت می‌کنند.
+        رسم‌ها با جابه‌جایی و بزرگ‌نمایی چارت همراه داده‌ها حرکت می‌کنند. برای ویرایش، در حالت عادی روی رسم کلیک کنید:
+        گره‌هایش را بکشید، رنگش را عوض کنید یا با Delete حذفش کنید (Esc = لغو). با علامت + هر نماد دلخواه
+        توبیت را به فهرست اضافه کنید. نزدیک نوک کندل‌ها، قیمت دقیقاً به سقف/کف کندل قفل می‌شود (مگنت).
       </p>
     </div>
   )

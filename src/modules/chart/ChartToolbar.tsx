@@ -1,12 +1,13 @@
 'use client'
 
 /**
- * Chart toolbar (RTL) — symbol chips, interval segmented control, live price
- * pill, drawing tools, signal visibility toggle and refresh.
+ * Chart toolbar (RTL) — symbol chips (+ user-defined custom symbols),
+ * interval segmented control, live price pill, drawing tools, signal
+ * visibility toggle and refresh.
  * Chips reuse `.tool-btn` (theme-aware, incl. dark active color) restyled as
  * pills via inline overrides — no extra CSS classes needed.
  */
-import type { CSSProperties } from 'react'
+import { useRef, useState, type CSSProperties } from 'react'
 import { fmtPrice } from '@/modules/common/format'
 import { INTERVALS, SYMBOLS, type DrawingToolId } from './types'
 
@@ -45,6 +46,10 @@ export interface ChartToolbarProps {
   hasDrawings: boolean
   onDeleteDrawing: () => void
   onClearDrawings: () => void
+  /** user-added custom symbols (persisted by the view) */
+  customSymbols: readonly string[]
+  onAddSymbol: (symbol: string) => void
+  onRemoveSymbol: (symbol: string) => void
 }
 
 interface ToolDef {
@@ -62,37 +67,122 @@ const DRAW_TOOLS: ToolDef[] = [
   { id: 'measure', icon: 'ph-ruler', label: 'اندازه‌گیری' },
 ]
 
+const CUSTOM_SYMBOL_RE = /^[A-Z0-9]{2,16}$/
+
 export function ChartToolbar(props: ChartToolbarProps) {
   const {
     symbol, onSymbolChange, interval, onIntervalChange, tool, onToolChange,
     loading, onRefresh, price, priceUp, showSignals, onToggleSignals,
     hasDrawings, onDeleteDrawing, onClearDrawings,
+    customSymbols, onAddSymbol, onRemoveSymbol,
   } = props
 
-  // an external symbol (outside the preset list, e.g. «مشاهده چارت» from
-  // another view) is rendered as one extra active chip at the end
-  const chips: readonly string[] = SYMBOLS.includes(symbol) ? SYMBOLS : [...SYMBOLS, symbol]
+  /* ——— custom symbol add input ——— */
+  const [adding, setAdding] = useState(false)
+  const [value, setValue] = useState('')
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
+  const submitCustom = () => {
+    const s = value.trim().toUpperCase()
+    if (CUSTOM_SYMBOL_RE.test(s)) {
+      onAddSymbol(s)
+      setValue('')
+      setAdding(false)
+    } else {
+      inputRef.current?.focus() // keep typing — invalid so far
+    }
+  }
+
+  // chips = presets + customs; an external symbol outside both lists still
+  // renders as one extra active chip (e.g. «مشاهده چارت» from another view)
+  const known = [...SYMBOLS, ...customSymbols]
+  const chips: readonly string[] = known.includes(symbol) ? known : [...known, symbol]
+
+  const isCustom = (s: string) => !SYMBOLS.includes(s) && customSymbols.includes(s)
 
   const priceColor =
     priceUp === true ? 'var(--success)' : priceUp === false ? 'var(--danger)' : 'var(--text-primary)'
 
   return (
     <div className="chart-toolbar">
-      {/* ——— symbol chips ——— */}
+      {/* ——— symbol chips (preset + user-defined) ——— */}
       {chips.map((s) => (
-        <button
-          key={s}
-          type="button"
-          className={`tool-btn ${s === symbol ? 'active' : ''}`}
-          style={chipStyle}
-          data-tooltip={`${s} / USDT`}
-          aria-label={`نماد ${s}`}
-          aria-pressed={s === symbol}
-          onClick={() => onSymbolChange(s)}
-        >
-          <span className="num">{s}</span>
-        </button>
+        <span key={s} style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0 }}>
+          <button
+            type="button"
+            className={`tool-btn ${s === symbol ? 'active' : ''}`}
+            style={{ ...chipStyle, ...(isCustom(s) ? { borderStyle: 'dashed' } : null) }}
+            data-tooltip={isCustom(s) ? `${s} / USDT — نماد دلخواه شما` : `${s} / USDT`}
+            aria-label={`نماد ${s}`}
+            aria-pressed={s === symbol}
+            onClick={() => onSymbolChange(s)}
+          >
+            <span className="num">{s}</span>
+          </button>
+          {isCustom(s) ? (
+            <button
+              type="button"
+              className="tool-btn"
+              style={{ width: 17, height: 17, borderRadius: '50%', fontSize: 11, marginLeft: -7, marginRight: 2, border: 'none', background: 'var(--bg-hover)', color: 'var(--danger)', zIndex: 1 }}
+              data-tooltip={`حذف ${s} از فهرست نمادها`}
+              aria-label={`حذف نماد ${s}`}
+              onClick={() => onRemoveSymbol(s)}
+            >
+              ×
+            </button>
+          ) : null}
+        </span>
       ))}
+
+      {/* ——— add custom symbol ——— */}
+      {adding ? (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <input
+            ref={inputRef}
+            autoFocus
+            dir="ltr"
+            value={value}
+            onChange={(e) => setValue(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 16))}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') submitCustom()
+              if (e.key === 'Escape') {
+                setValue('')
+                setAdding(false)
+              }
+            }}
+            placeholder="SYMBOL"
+            aria-label="نام نماد جدید (مثل LTC)"
+            style={{
+              width: 96, height: 30, padding: '0 9px', borderRadius: 9,
+              border: '1px solid var(--accent)', background: 'var(--bg-input)',
+              color: 'var(--text-primary)', fontSize: 12, fontWeight: 700,
+              fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
+              outline: 'none', letterSpacing: 0.5,
+            }}
+          />
+          <button
+            type="button"
+            className="tool-btn"
+            style={{ width: 28, height: 28, fontSize: 14, color: 'var(--success)' }}
+            data-tooltip="افزودن نماد"
+            aria-label="افزودن نماد"
+            onClick={submitCustom}
+          >
+            <i className="ph ph-check" aria-hidden />
+          </button>
+        </span>
+      ) : (
+        <button
+          type="button"
+          className="tool-btn"
+          style={{ width: 28, height: 28, fontSize: 15 }}
+          data-tooltip="افزودن نماد دلخواه (هر نماد توبیت)"
+          aria-label="افزودن نماد دلخواه"
+          onClick={() => setAdding(true)}
+        >
+          <i className="ph ph-plus" aria-hidden />
+        </button>
+      )}
 
       <span style={sepStyle} />
 

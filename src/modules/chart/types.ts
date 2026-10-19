@@ -109,7 +109,21 @@ export interface Drawing {
   price1: number
   time2: number
   price2: number
+  /** user-chosen stroke color (drawings are editable); missing → theme accent */
+  color?: string
 }
+
+/** Palette offered in the drawing editor (theme-neutral trading colors). */
+export const DRAW_COLORS: readonly string[] = [
+  '#6366f1', // accent (theme default)
+  '#10b981', // emerald
+  '#ef4444', // red
+  '#f59e0b', // amber
+  '#06b6d4', // cyan
+  '#a855f7', // purple
+  '#ec4899', // pink
+  '#64748b', // slate
+]
 
 /** In-progress two-point drawing (start anchored logically, end follows the mouse). */
 export interface DrawingDraft {

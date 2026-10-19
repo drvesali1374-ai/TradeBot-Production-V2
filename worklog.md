@@ -1434,3 +1434,24 @@ Work Log:
 Stage Summary:
 - ناپایداری به‌طور ریشه‌ای حل شد (نه فقط علامت‌زدایی): الگوی خطرناک gitignore حذف + فایل committed → از این پس restart سندباکس خطا را بازنمی‌گرداند
 - repo عمومی github.com/<owner>/TradeBot-Production-V2 با کل سورس push شد (تاریخ commit های checkpoint سندباکس حفظ شد)
+
+---
+Task ID: chart-upgrade-1
+Agent: main-orchestrator
+Task: ۴ خواسته‌ی چارت — ویرایش رسم‌ها (گره+رنگ)، کادر سیگنال auto-size، نماد دلخواه، اصلاح ابزار اندازه‌گیری (LTR + ریشه‌یابی ٪)
+
+Work Log:
+- تحلیل کامل قبل از پیاده‌سازی (لیست منظم ارائه شد به کاربر):
+  ۱) ویرایش رسم: انتخاب با کلیک (حالت عادی) روی wrap با onPointerDownCapture (نه mousedown — lightweight-charts با pointer events پن می‌کند) + stopPropagation؛ hitTestDrawing با اولویت دستگیره (۹px) روی بدنه (۷px)؛ درگ گره با مگنت، درگ بدنه با آفست منطقی (hline=قیمت، vline=زمان، دوعضوی=انتقال، مستطیل=۴ گوشه)؛ پنل ویرایش ۸ رنگ + حذف انتخابی + Esc لغو درگ/انتخاب + Delete حذف؛ بازخورد کرسر با data-dhover (CSS !important بر کرسر خود کتابخانه)؛ رنگ در Drawing.color + lastColor پیش‌فرض رسم بعدی
+  ۲) کادر سیگنال: width 250px ثابت → max-content + min/maxWidth + flexWrap سطرها — دیگر هیچ محتوایی بریده نمی‌شود
+  ۳) نماد دلخواه: دکمه + → ورودی LTR با اعتبارسنجی ^[A-Z0-9]{2,16}$، چیپ خط‌چین + × حذف، localStorage (tradebot.chart.customSymbols، سقف ۱۶)، سوییچ خودکار به نماد جدید؛ سرور بدون لیست سفید بود (هر SYMBOL-SWAP-USDT)
+  ۴) اندازه‌گیری: کادر کامل بازنویسی LTR (direction ltr، textAlign left، ارقام لاتین، فونت monospace) + خط‌های From/To/Δ/Δ%/Bars/Span برای قابلیت راستی‌آزمایی
+- ریشه‌یابی ٪ ۸.۲ vs ۴.۶۳: فرمول کد = دقیقا فرمول TV ((p2−p1)/p1×100) ✓؛ نگاشت فیلد کندل Toobit خام ([t,o,h,l,c,v]) با اعتبارسنجی OHLC ✓؛ فید داده Toobit vs Binance بر ۴ نماد (اختلاف <۰.۱۵٪) ✓ → فرمول و داده سالم؛ باقی‌مانده دقت ثبت نقطه‌ی کلیک بود → مگنت اضافه شد: نزدیک ۸px نوک سقف/کف، قیمت دقیقا به high/low کندل snap می‌شود
+- E2E مرورگر (agent-browser + VLM): ثبت اندازه‌گیری بین کف 80,629.5 و سقف 82,886.9 با کلیک پیکسلی دقیق → drawings() دقیقا همان قیمت‌ها (مگنت ✓) → VLM خواند کادر: From 80,629.5 / To 82,886.9 / Δ +2,257.4 / Δ% +2.8% / Bars 10 / Span 10 ساعت — LTR ✓ ارقام لاتین ✓ و ۲.۸۰٪ = محاسبه دقیق TV ✓
+- درگ گره دوم به کندل دیگر → time2/price2 دقیقا سقف آن کندل (۸۲۷۶۳.۲) ✓؛ رنگ قرمز → VLM تایید ✓؛ Esc=بستن پنل ✓؛ Delete=حذف ✓؛ LTC اضافه شد (چیپ + localStorage [\"LTC\"] + ۵۰۰ کندل واقعی ~$70.8) ✓؛ حذف چیپ ✓؛ سوییچ BTC محو چیپ ✓
+- کادر سیگنال: max-content، scrollWidth==clientWidth (صفر برش)، موبایل 390px جا شد ✓؛ تم تاریک + خط قرمز + پنل با VLM تایید ✓؛ صفر خطای کنسول/صفحه
+- tsc ۰ خطا · lint ۰ خطا
+
+Stage Summary:
+- ۵ فایل تغییر یافت: types.ts (+color/DRAW_COLORS)، drawingRender.ts (رنگ، دستگیره، hit-test، کادر LTR)، ChartToolbar.tsx (نماد دلخواه)، ChartView.tsx (انتخاب/درگ/مگنت/پنل ویرایش/auto-size/localStorage/debug hook)، globals.css (کرسر)
+- ابزار اندازه‌گیری اکنون ریاضیاتی قابل اثبات است: قیمت هر دو نقطه در کادر نمایش داده می‌شود و با مگنت همیشه دقیقا روی نوک کندوک قفل می‌شود
