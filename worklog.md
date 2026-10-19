@@ -1395,3 +1395,26 @@ Stage Summary:
 - تست واقعی: ورود ✓ نمادها ✓ موجودی دمو ۱۰۰۰۰ ✓ کندل واقعی توبیت ✓ چرخه از UI (۶ مرحله، سیگنال منقضی = رفتار صحیح) ✓ جریان سفارش دمو (باز/بست/TP-SL/PnL زنده) ✓
 - مرورگر (agent-browser + VLM): داشبورد/چارت/تنظیمات/اتوماسیون رندر ✓ تم روشن/تاریک ✓ موبایل 390px (فوتر sticky، بدون سرریز) ✓ رسم خط افقی + حذف ✓ صفر خطای کنسول ✓
 - حالت آزمایشی: بدون کلید API → بازار واقعی + حساب شبیه‌سازی؛ با کلید → اتصال زنده توبیت
+
+---
+Task ID: fix-storage-adapter
+Agent: main-orchestrator
+Task: رفع خطای build «Module not found: Can't resolve './local-adapter'» (گزارش کاربر — پیشنمایش اجرا نمی‌شد)
+
+Work Log:
+- ریشه‌یابی: src/server/storage/index.ts ماژول './local-adapter' را import می‌کرد ولی فایل src/server/storage/local-adapter.ts هرگز روی دیسک نوشته نشده بود (entry قبلی worklog §impl-main آن را توصیف کرده اما فایل جا مانده بود). فایل داده db/trading_data.json موجود بود.
+- ساخت src/server/storage/local-adapter.ts با کلاس LocalKVAdapter (پیاده‌سازی کامل KVStore):
+  * بارگذاری تنبل نقشه KV از db/trading_data.json + مسیر قابل‌تنظیم با TB_DATA_FILE/TRADING_DATA_FILE (رفع باگ DB_PATH مطلق پروژه مرجع، audit §F.2)
+  * صف سریال نوشتن (promise chain) — همه put/delete از طریق یک زنجیره سریال flush می‌شوند؛ رقابت read-modify-write ممکن نیست نوشتن را گم کند
+  * نوشتن اتمیک: tmp + rename — خرابی فایل در کرش میانی غیرممکن
+  * deep-clone در get/put — فراخوان نمی‌تواند cache را درجا تغییر دهد (تشخیص تغییر WriteBatcher سالم می‌ماند)
+  * شمارنده بودجه منطقی (get/list=خواندن، put/delete=نوشتن) — هم‌ارز CloudflareKVAdapter برای قیاس diagnostics
+- راستی‌آزمایی: tsc → ۰ خطای src · lint → ۰ خطا · GET / → 200 · /api/auth/verify → 401 درست (نه 500)
+- تست مرورگر کامل (agent-browser): ورود admin/admin123 (اعتبارنامه persisted از جلسه قبل) ✓ داشبورد KPI ✓ نماهای اتوماسیون/چارت/تنظیمات ✓ داده بازار واقعی توبیت (klines/ticker/analysis 200) ✓
+- اجرای یک چرخه از UI: POST /api/automation/run-cycle → 200؛ بودجه ۴ نوشتن (مطابق هدف سند ۳-۵)؛ فایل JSON سالم و lastCycleResult (DOT، SIGNAL_EXPIRED، ۶ مرحله) persisted شد
+- تشخیص بودجه از /api/diagnostics/storage در طول چرخه کار کرد؛ صفر خطای کنسول/صفحه؛ تم تاریک ✓؛ موبایل 390px فوتر sticky پایین ✓
+
+Stage Summary:
+- فایل ساخته‌شده: src/server/storage/local-adapter.ts — تنها فایل تغییریافته؛ هیچ رگرسیونی در بقیه پروژه
+- پیشنمایش کاربر کاملاً بازیابی شد: صفحه اصلی 200، ورود، داشبورد، چرخه معاملاتی، بودجه ذخیره‌سازی و همه APIها سالم
+- نکته: اعتبارنامه ورود فعلی admin/admin123 است (در حافظه پایدار از تست قبلی؛ با صفحه تنظیمات قابل تغییر)
