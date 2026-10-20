@@ -32,6 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -55,3 +56,12 @@ server.log
 /tool-results/
 .zscripts/dev.pid
 .zscripts/dev.log
+# local runtime data (secrets live here — NEVER commit)
+/db/*.json
+/db/*.db
+/db/*.sqlite
+/db/*.sqlite-*
+*.db-journal
+# sanitized example fixtures ARE committed (structure only, fake values)
+!.env.example
+!/db/trading_data.example.json

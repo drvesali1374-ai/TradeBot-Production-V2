@@ -1,0 +1,23 @@
+{
+  "automationState:automation_symbols": [
+    { "id": 1, "name": "DOT", "status": "waiting", "errorCount": 0, "lastCycleTime": null },
+    { "id": 2, "name": "BTC", "status": "waiting", "errorCount": 0, "lastCycleTime": null },
+    { "id": 3, "name": "ETH", "status": "waiting", "errorCount": 0, "lastCycleTime": null }
+  ],
+  "automationState:lastCycleResult": null,
+  "automationState:automationSettings": null,
+  "automationState:settings_apiKeys": {
+    "apiKey": "FAKE-EXAMPLE-KEY-00000000000000000000000000000000000000000000000000000000",
+    "secretKey": "FAKE-EXAMPLE-SECRET-000000000000000000000000000000000000000000000000000",
+    "baseUrl": "https://api.toobit.com",
+    "baleToken": "0000000000:FAKE-EXAMPLE-BALE-TOKEN-XXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "baleChatId": "000000000"
+  },
+  "automationState:auth_credentials": {
+    "username": "admin",
+    "passwordHash": "sha256-of-salt:password — example only, replaced on first login",
+    "salt": "00000000000000000000000000000000",
+    "issuedAt": 0
+  },
+  "logs": []
+}
