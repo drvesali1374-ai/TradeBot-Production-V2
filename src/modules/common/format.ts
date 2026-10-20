@@ -16,7 +16,12 @@ export function fmtPrice(n: number | null | undefined): string {
 export function fmtUsd(n: number | null | undefined, digits = 2): string {
   if (n == null || Number.isNaN(n)) return '—'
   const sign = n < 0 ? '−' : ''
-  return `${sign}$${fmtNum(Math.abs(n), digits)}`
+  // money amounts keep a stable 2-decimal presentation ($12.50, not $12.5)
+  const abs = Math.abs(n).toLocaleString('en-US', {
+    minimumFractionDigits: Math.min(2, digits),
+    maximumFractionDigits: digits,
+  })
+  return `${sign}$${abs}`
 }
 
 export function fmtPct(n: number | null | undefined, digits = 1): string {
