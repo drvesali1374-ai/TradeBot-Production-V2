@@ -1,7 +1,9 @@
 'use client'
 
 /**
- * App header — page title + theme toggle + notifications + primary action.
+ * App header — page title + theme toggle + primary action.
+ * Sticky on every view (mission §11): the shell renders it once with
+ * position:sticky so scrolling keeps it visible everywhere.
  * NOTE: no Start/Stop buttons by design (instruction §10.1) — execution
  * is either Cron (cloud) or the single «یک چرخه» button.
  */
@@ -37,7 +39,7 @@ export function AppHeader({ title, subtitle, onRunCycle, running, onOpenMobileNa
   return (
     <header className="top-header">
       <div className="header-right">
-        <button type="button" className="icon-btn mobile-toggle" onClick={onOpenMobileNav} data-tooltip="منو" aria-label="باز کردن منو">
+        <button type="button" className="icon-btn mobile-toggle" onClick={onOpenMobileNav} data-tooltip="منو" aria-label="باز کردن منو" aria-expanded="false">
           <i className="ph ph-list" aria-hidden />
         </button>
         <div>
@@ -55,7 +57,7 @@ export function AppHeader({ title, subtitle, onRunCycle, running, onOpenMobileNa
         >
           <i className={isDark ? 'ph ph-sun' : 'ph ph-moon'} aria-hidden />
         </button>
-        <span className="demo-pill" data-tooltip="اجرای خودکار: کرون ابر — هر ۵ دقیقه">
+        <span className="sched-pill" data-tooltip="اجرای خودکار: کرون ابر — هر ۵ دقیقه">
           <i className="ph-fill ph-cloud-arrow-up" aria-hidden />
           <span className="num">*/5</span>
         </span>

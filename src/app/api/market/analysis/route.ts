@@ -22,8 +22,10 @@ export async function GET(req: Request) {
     const ms = intervalToMs(settings.interval)
     const candles = raw.map((c) => ({ ...c, closeTime: c.openTime + ms }))
     const analysis = analyzeSymbol({ symbol, candles, settings, now: Date.now() })
-    // History-based status: demo fills power the UI status; live mode
-    // shows PENDING/EXPIRED which the engine resolves at cycle time.
+    // Status resolution uses only real fill data. With no signed fill
+    // source wired here, statuses fall back to PENDING/EXPIRED — the
+    // cycle engine resolves the truth at execution time. Nothing is
+    // fabricated (mission §13).
     const statuses = resolveSignalStatus(
       analysis.signals,
       [],

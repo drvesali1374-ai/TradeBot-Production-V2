@@ -106,34 +106,46 @@ export interface BalanceInfo {
   fetchedAt: number
 }
 
+/**
+ * Open position — internal contract (converted from Toobit's raw payload
+ * in exactly ONE place: normalizePosition in toobit/client.ts).
+ *
+ * UNITS: `unrealizedPnL` / `margin` = USDT; `profitRate` = PERCENT units
+ * (Toobit's raw fraction is multiplied by 100 at the normalizer — raw
+ * "0.003" becomes 0.3 percent here).
+ *
+ * NULLABILITY: any field the exchange did not provide or provided in an
+ * invalid format is `null` — the UI must show «نامشخص», never a fake zero.
+ */
 export interface OpenPosition {
   symbol: string
   side: 'LONG' | 'SHORT'
-  qty: number
-  available: number
-  margin: number
-  leverage: number
-  entryPrice: number
-  markPrice: number
-  unrealizedPnL: number
-  profitRate: number
-  /** TP/SL if known (demo mode tracks them; live mode from exchange when exposed) */
+  qty: number | null
+  available: number | null
+  margin: number | null
+  leverage: number | null
+  entryPrice: number | null
+  markPrice: number | null
+  unrealizedPnL: number | null
+  /** PnL rate in PERCENT units (fraction ×100 at the normalizer) */
+  profitRate: number | null
+  /** Toobit's positions endpoint does not expose TP/SL — null until exposed */
   takeProfit?: number | null
   stopLoss?: number | null
 }
 
+/** Closed position — `realizedPnlRate` in PERCENT units (fraction ×100). */
 export interface ClosedPosition {
   id: string
   symbol: string
   side: 'LONG' | 'SHORT'
-  qty: number
+  qty: number | null
   entryPrice?: number | null
   closePrice: number
   closeTime: number
   realizedPnl: number
   realizedPnlRate: number
   leverage: number
-  /** TP or SL hit (demo mode only; live unknown) */
   closeReason?: 'TP' | 'SL' | 'MANUAL' | 'UNKNOWN'
 }
 
@@ -205,30 +217,41 @@ export interface CycleResult {
     tpslConfirmed: boolean
   } | null
   steps: StepLog[]
-  logs: CycleLogEntry[]
   storage: CycleStorageBudget
-  demo: boolean
   error?: string
-}
-
-export interface CycleLogEntry {
-  message: string
-  type: 'info' | 'success' | 'warning' | 'error'
-  symbol?: string
-  timestamp: number
 }
 
 /* ------------------------------------------------------------------ */
 /* Persisted log record (KV `logs` array, capped)                      */
 /* ------------------------------------------------------------------ */
 
+export type LogStatus = 'SUCCESS' | 'INFO' | 'SKIPPED' | 'WARNING' | 'ERROR'
+
+/**
+ * Reference event model (mission §5): one row per real operational event.
+ * Every cycle step becomes exactly one record — persisted in a SINGLE
+ * batched KV write at the end of the cycle (never per-step writes).
+ *
+ * Backward compatibility: rows written by older versions lack the new
+ * fields (`process`, `source`, `durationMs`, `step`) — consumers must
+ * fall back to `action` when `process` is absent.
+ */
 export interface LogRecord {
   id: number
   symbol: string | null
+  /** Legacy action tag (e.g. 'automation_cycle', 'settings') */
   action: string
-  status: 'SUCCESS' | 'WARNING' | 'ERROR'
+  /** The real process name (cycle step / operation), e.g. 'ثبت سفارش' */
+  process?: string
+  status: LogStatus
   message: string
   cycleId?: string
-  details?: string
+  /** Structured or stringified technical details (secret-free) */
+  details?: string | Record<string, unknown>
+  /** 'manual' | 'cron' | 'system' — who triggered the owning cycle/op */
+  source?: 'manual' | 'cron' | 'system'
+  durationMs?: number | null
+  /** Step ordinal within its cycle (when applicable) */
+  step?: number | null
   created_at: string
 }

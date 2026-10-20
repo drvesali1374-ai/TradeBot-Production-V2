@@ -22,7 +22,7 @@ import {
   splitClosedCandles,
   STRATEGY_VERSION,
 } from '@/core'
-import type { CycleResult, CycleAction, SymbolEntry } from '@/core/types'
+import type { CycleResult, CycleAction, SymbolEntry, LogRecord, StepLog, LogStatus } from '@/core/types'
 import type { AutomationSettings } from '@/core/settings'
 import { getStorage, STORAGE_KEYS, WriteBatcher, LOGS_CAP } from '@/server/storage'
 import { ToobitClient } from '@/server/exchanges/toobit'
@@ -65,12 +65,9 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
       source: options.source,
       action,
       steps: ctx.steps,
-      logs: ctx.logs,
       storage: { reads: store.budget().reads, writes: store.budget().writes },
-      demo: true,
       ...extra,
     }
-    if (extra.demo !== undefined) result.demo = extra.demo
     return result
   }
 
@@ -95,9 +92,14 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
         ]
     const client = new ToobitClient({ apiKey: ctx.account.apiKey, secretKey: ctx.account.secretKey })
     ctx.step('بارگذاری تنظیمات', 'ok', `تنظیمات و ${ctx.symbols.length} نماد بارگذاری شد`, {
-      mode: client.mode,
       settingsVersion: STRATEGY_VERSION,
+      hasCredentials: client.hasCredentials,
     })
+    if (!client.hasCredentials) {
+      ctx.step('بررسی اعتبارنامه', 'warning', 'اعتبارنامه صرافی تنظیم نشده است — عملیات حساب و سفارش در این چرخه متوقف می‌شود', {
+        hint: 'کلید API و Secret را در صفحه تنظیمات وارد کنید',
+      })
+    }
 
     /* ---- Step 3: lock ---- */
     ctx.beginStep()
@@ -106,7 +108,6 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
       ctx.step('قفل اجرا', 'warning', 'چرخه دیگری در حال اجراست — اجرای هم‌زمان رد شد', {
         heldBy: lock.heldBy?.cycleId,
       })
-      ctx.log('اجرای هم‌زمان چرخه رد شد (قفل فعال)', 'warning')
       return finish('ERROR', { error: 'چرخه موازی در حال اجراست' })
     }
     ctx.step('قفل اجرا', 'ok', 'قفل اجرا فعال شد')
@@ -135,14 +136,12 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
       }
       if (idx < 0) {
         ctx.step('انتخاب نماد', 'skipped', 'نماد آماده‌ای برای چرخه وجود ندارد (زمان انتظار)')
-        ctx.log('هیچ نمادی برای چرخه آماده نیست', 'info')
         return finish('NO_READY_SYMBOL')
       }
       ctx.symbolIndex = idx
       const symbol = ctx.symbols[idx].name
       ctx.markCycleStart()
       ctx.step('انتخاب نماد', 'ok', `نماد ${symbol} انتخاب شد`, { symbol, tradeWaitTime: ctx.settings.tradeWaitTime })
-      ctx.log(`چرخه برای نماد ${symbol} آغاز شد`, 'info', symbol)
 
       /* ---- Step 5: market data ---- */
       ctx.beginStep()
@@ -158,7 +157,6 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
           forming: forming ? 1 : 0,
           lastClosedAt: closed.length ? closed[closed.length - 1].closeTime : null,
         })
-        ctx.log(`${candles.length} کندل دریافت شد`, 'info', symbol)
       } catch (e) {
         ctx.step('داده بازار', 'failed', `دریافت کندل‌ها ناموفق: ${e instanceof Error ? e.message : 'خطا'}`)
         throw e
@@ -173,11 +171,9 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
         lastPrice: analysis.lastPrice,
         strategy: 'FakeBreakout',
       })
-      ctx.log(`تحلیل انجام شد — ${analysis.signals.length} سیگنال`, 'info', symbol)
 
       if (!pending) {
         ctx.step('انتخاب سیگنال', 'skipped', 'سیگنالی برای بررسی وجود ندارد')
-        ctx.log('سیگنالی موجود نیست', 'info', symbol)
         ctx.markCycleEnd()
         await batcher.persist()
         return finish('NO_SIGNAL')
@@ -191,7 +187,6 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
           ageHours: (now - pending.signalConfirmedAt) / 3600_000,
           expirationHours: ctx.settings.signalExpirationHours,
         })
-        ctx.log('سیگنال منتخب منقضی شده است', 'warning', symbol)
         ctx.markCycleEnd()
         await batcher.persist()
         return finish('SIGNAL_EXPIRED')
@@ -223,7 +218,7 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
       ctx.beginStep()
       const targetSide = pending.side === 'Long' ? 'LONG' : 'SHORT'
       const oppositeSide = pending.side === 'Long' ? 'SHORT' : 'LONG'
-      const opposite = symbolPositions.filter((p) => p.side === oppositeSide && (p.available || p.qty) > 0)
+      const opposite = symbolPositions.filter((p) => p.side === oppositeSide && ((p.available ?? p.qty) ?? 0) > 0)
       let oppositeClosed = false
       if (opposite.length > 0) {
         const closeRes = await client.closePosition({ symbol, side: oppositeSide })
@@ -235,13 +230,6 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
             ? `${closeRes.closed} پوزیشن مخالف بسته شد`
             : 'بستن پوزیشن مخالف ناموفق بود',
           { closed: closeRes.closed, total: closeRes.total, errors: closeRes.errors }
-        )
-        ctx.log(
-          closeRes.closed > 0
-            ? `${closeRes.closed} پوزیشن مخالف (${oppositeSide}) بسته شد`
-            : 'بستن پوزیشن مخالف ناموفق بود',
-          closeRes.closed > 0 ? 'success' : 'error',
-          symbol
         )
         if (closeRes.closed === 0) {
           ctx.markCycleEnd()
@@ -277,8 +265,7 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
       const riskData = risk.results.map((r) => ({ control: r.control, passed: r.passed }))
       if (!risk.passed && risk.rejection) {
         ctx.step('کنترل ریسک', 'skipped', risk.rejection.message, { controls: riskData, math: risk.rejection.math })
-        ctx.log(`رد معامله: ${risk.rejection.message}`, 'warning', symbol)
-        await notifyRejection(ctx, risk.rejection, pending, balance, newMargin, client.mode)
+        await notifyRejection(ctx, risk.rejection, pending, balance, newMargin)
         ctx.markCycleEnd()
         await batcher.persist()
         return finish('RISK_REJECTED', { reason: risk.rejection.control, signal: pending })
@@ -307,20 +294,14 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
         tp: pending.tp,
         sl: pending.sl,
         tpslConfirmed: order.tpslConfirmed,
+        tpslError: order.tpslError,
         executionRequestedAt,
         orderSubmittedAt,
       })
-      ctx.log(
-        order.tpslConfirmed
-          ? `پوزیشن ${pending.side} روی ${symbol} با ${order.qty} قرارداد باز شد`
-          : `پوزیشن باز شد اما تنظیم TP/SL ناموفق بود — نیازمند بررسی`,
-        order.tpslConfirmed ? 'success' : 'warning',
-        symbol
-      )
 
       /* ---- Step 13: Bale notification ---- */
       ctx.beginStep()
-      await notifyOpen(ctx, pending, order, leverage, newMargin, client.mode)
+      await notifyOpen(ctx, pending, order, leverage, newMargin)
 
       /* ---- Step 14: persist ---- */
       ctx.beginStep()
@@ -344,7 +325,6 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
           sl: pending.sl,
           tpslConfirmed: order.tpslConfirmed,
         },
-        demo: client.mode === 'demo',
       })
     } finally {
       await releaseLock(cycleId)
@@ -353,8 +333,7 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
     // Error path: symbol error accounting + rejection of parallel write
     const message = e instanceof Error ? e.message : 'خطای ناشناخته'
     const { skipped } = ctx.markError(ctx.settings?.allowedErrors ?? 3)
-    ctx.step('خطای چرخه', 'failed', message)
-    ctx.log(`خطای چرخه: ${message}`, 'error', ctx.selectedSymbol?.name)
+    ctx.step('خطای چرخه', 'failed', message, { symbol: ctx.selectedSymbol?.name ?? null })
     try {
       await sendBale(
         { baleToken: ctx.account?.baleToken ?? '', baleChatId: ctx.account?.baleChatId ?? '' },
@@ -383,8 +362,7 @@ async function notifyRejection(
   rejection: { control: string; message: string; math: string },
   signal: { symbol: string; side: string; price: number },
   balance: { total: number; free: number },
-  newMargin: number,
-  mode: 'live' | 'demo'
+  newMargin: number
 ): Promise<void> {
   const tags: Record<string, string> = {
     SAFE_ASSET: '#دارایی_امن',
@@ -400,7 +378,6 @@ async function notifyRejection(
     rejection.message,
     `قیاس: ${rejection.math}`,
     `موجودی کل: ${fa(balance.total)} | آزاد: ${fa(balance.free)} | مارجین جدید: ${fa(newMargin)}`,
-    mode === 'demo' ? '(محیط آزمایشی)' : '',
   ]
     .filter(Boolean)
     .join('\n')
@@ -416,8 +393,7 @@ async function notifyOpen(
   signal: { symbol: string; side: string; price: number; tp: number; sl: number; signalConfirmedAt: number },
   order: { qty: number; price: number; tpslConfirmed: boolean },
   leverage: number,
-  margin: number,
-  mode: 'live' | 'demo'
+  margin: number
 ): Promise<void> {
     const text = [
     '#ورود_پوزیشن',
@@ -432,10 +408,7 @@ async function notifyOpen(
     order.tpslConfirmed ? 'TP/SL: ثبت شد ✓' : 'TP/SL: ثبت نشد — بررسی دستی لازم است ⚠',
     `زمان تأیید سیگنال: ${new Date(signal.signalConfirmedAt).toISOString()}`,
     `زمان ثبت سفارش: ${new Date().toISOString()}`,
-    mode === 'demo' ? '(محیط آزمایشی — سفارش شبیه‌سازی شده)' : '',
-  ]
-    .filter(Boolean)
-    .join('\n')
+  ].join('\n')
   try {
     await sendBale({ baleToken: ctx.account.baleToken, baleChatId: ctx.account.baleChatId }, text)
     ctx.step('اعلان بله', 'ok', 'اعلان ورود ارسال/صف شد')
@@ -450,27 +423,65 @@ async function notifyOpen(
 /* store. This keeps storage concerns separated).                      */
 /* ------------------------------------------------------------------ */
 
+/** Internal StepStatus → persisted LogStatus (mission §5). */
+const STEP_TO_LOG_STATUS: Record<StepLog['status'], LogStatus> = {
+  ok: 'SUCCESS',
+  info: 'INFO',
+  skipped: 'SKIPPED',
+  warning: 'WARNING',
+  failed: 'ERROR',
+}
+
+/** Strip any secret-looking keys from step data before persisting. */
+function sanitizeStepData(data: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!data) return undefined
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(data)) {
+    if (/secret|password|token|apikey|api_key/i.test(k)) continue
+    out[k] = v
+  }
+  return Object.keys(out).length ? out : undefined
+}
+
+/**
+ * Persist the cycle outcome: lastCycleResult + the cycle's steps as
+ * unified log records (mission §5) — real process names, statuses and
+ * technical details (risk controls, orderId, API errors), one record
+ * per step, NO duplicates.
+ *
+ * KV discipline: the log array is read once, merged with the new events
+ * IN MEMORY and written back in exactly ONE put — a 14-step cycle costs
+ * one logs write, not fourteen (mission §5 KV budget).
+ */
 export async function persistCycleOutcome(result: CycleResult): Promise<void> {
   const store = getStorage()
-  const writes: Promise<void>[] = []
-  writes.push(store.put(STORAGE_KEYS.lastCycleResult, result))
 
-  const logs = (await store.get<import('@/core/types').LogRecord[]>(STORAGE_KEYS.logs)) ?? []
-  const newRecords = result.logs.map((l, i) => ({
-    id: -Date.now() - i, // negative ids for transient in-memory numbering
-    symbol: l.symbol ?? result.symbol,
+  const newRecords: LogRecord[] = result.steps.map((s) => ({
+    id: 0, // renumbered below
+    symbol: result.symbol,
     action: 'automation_cycle',
-    status: l.type === 'error' ? 'ERROR' : l.type === 'warning' ? 'WARNING' : 'SUCCESS',
-    message: l.message,
+    process: s.name,
+    status: STEP_TO_LOG_STATUS[s.status] ?? 'INFO',
+    message: s.message,
     cycleId: result.cycleId,
-    details: JSON.stringify({ timestamp: l.timestamp, type: l.type, source: result.source }),
-    created_at: new Date(l.timestamp).toISOString(),
+    details: sanitizeStepData(s.data),
+    source: result.source,
+    durationMs: s.durationMs ?? null,
+    step: s.step,
+    created_at: new Date(s.at).toISOString(),
   }))
-  const merged = [...newRecords, ...logs].slice(0, LOGS_CAP)
-  // renumber stable
+
+  const logs = (await store.get<LogRecord[]>(STORAGE_KEYS.logs)) ?? []
+  const merged = [...newRecords, ...logs]
+    .filter((r) => r && typeof r === 'object') // drop malformed rows
+    .slice(0, LOGS_CAP)
   merged.forEach((r, i) => (r.id = i + 1))
-  writes.push(store.put(STORAGE_KEYS.logs, merged))
-  await Promise.all(writes)
+
+  // exactly TWO puts per cycle — the result and the (single) log array
+  await Promise.all([
+    store.put(STORAGE_KEYS.lastCycleResult, result),
+    store.put(STORAGE_KEYS.logs, merged),
+  ])
 }
 
 /** Closed-positions history notification (checkClosedPositionsHistory). */

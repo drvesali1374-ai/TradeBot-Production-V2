@@ -1,11 +1,14 @@
 'use client'
 
 /**
- * App sidebar — RTL fixed nav (theme port), view switching, mobile drawer.
+ * App sidebar — RTL fixed nav, view switching, mobile drawer.
+ * Active views only (mission §7): automation / chart / settings.
+ * The drawer sits ABOVE its backdrop (z-index 110 vs 100) and closes
+ * via navigation, outside click (backdrop) or Escape (mission §12).
  */
 import { useEffect, useState } from 'react'
 
-export type ViewId = 'dashboard' | 'automation' | 'chart' | 'settings'
+export type ViewId = 'automation' | 'chart' | 'settings'
 
 interface NavItem {
   id: ViewId
@@ -15,7 +18,6 @@ interface NavItem {
 }
 
 const NAV: NavItem[] = [
-  { id: 'dashboard', label: 'داشبورد', icon: 'ph-fill ph-squares-four', description: 'نمای کلی عملکرد و پورتفوی' },
   { id: 'automation', label: 'اتوماسیون', icon: 'ph-fill ph-robot', description: 'پنل کنترل چرخه‌های معاملاتی' },
   { id: 'chart', label: 'چارت حرفه‌ای', icon: 'ph-fill ph-candlestick-chart', description: 'نمودار تعاملی با ابزار رسم' },
   { id: 'settings', label: 'تنظیمات', icon: 'ph-fill ph-gear-six', description: 'استراتژی، صرافی و اعلان‌ها' },
@@ -25,13 +27,12 @@ interface SidebarProps {
   active: ViewId
   onNavigate: (v: ViewId) => void
   username: string | null
-  demoMode: boolean
   onLogout: () => void
   mobileOpen: boolean
   onCloseMobile: () => void
 }
 
-export function Sidebar({ active, onNavigate, username, demoMode, onLogout, mobileOpen, onCloseMobile }: SidebarProps) {
+export function Sidebar({ active, onNavigate, username, onLogout, mobileOpen, onCloseMobile }: SidebarProps) {
   const [profileOpen, setProfileOpen] = useState(false)
 
   useEffect(() => {
@@ -42,6 +43,15 @@ export function Sidebar({ active, onNavigate, username, demoMode, onLogout, mobi
     return () => window.removeEventListener('keydown', onKey)
   }, [onCloseMobile])
 
+  // Lock body scroll while the drawer is open so the backdrop does not
+  // fight the page behind it (mission §12 — smooth, no stuck layers).
+  useEffect(() => {
+    document.body.classList.toggle('nav-drawer-open', mobileOpen)
+    return () => {
+      document.body.classList.toggle('nav-drawer-open', false)
+    }
+  }, [mobileOpen])
+
   return (
     <>
       <div
@@ -49,7 +59,11 @@ export function Sidebar({ active, onNavigate, username, demoMode, onLogout, mobi
         onClick={onCloseMobile}
         aria-hidden
       />
-      <aside className={`sidebar${mobileOpen ? ' mobile-open' : ''}`} aria-label="ناوبری اصلی">
+      <aside
+        className={`sidebar${mobileOpen ? ' mobile-open' : ''}`}
+        aria-label="ناوبری اصلی"
+        aria-hidden={undefined}
+      >
         <div className="logo">
           <div className="logo-icon">
             <i className="ph-fill ph-robot" aria-hidden />
@@ -57,7 +71,6 @@ export function Sidebar({ active, onNavigate, username, demoMode, onLogout, mobi
           <div>
             <div className="logo-text">تریدبات</div>
           </div>
-          <span className="logo-badge">{demoMode ? 'Demo' : 'Live'}</span>
         </div>
 
         <nav className="nav-menu">
@@ -101,7 +114,7 @@ export function Sidebar({ active, onNavigate, username, demoMode, onLogout, mobi
             <div className="user-info">
               <div className="user-name">{username ?? 'کاربر'}</div>
               <div className="user-plan">
-                <span className="dot" /> {demoMode ? 'حالت آزمایشی' : 'اتصال زنده'}
+                <span className="dot" /> مدیر ربات
               </div>
             </div>
             <i className="ph ph-sign-out" style={{ color: 'var(--danger)' }} aria-hidden />

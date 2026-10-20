@@ -85,21 +85,32 @@ export function evaluateRiskControls(
     // Last entry = highest entry among same-side positions (reference used last entry)
     const sameSide = symbolPositions.filter((p) => p.side === (isLong ? 'LONG' : 'SHORT'))
     if (sameSide.length > 0) {
-      const lastEntry = sameSide[sameSide.length - 1].entryPrice
-      const distancePct = isLong
-        ? ((lastEntry - ctx.price) / lastEntry) * 100
-        : ((ctx.price - lastEntry) / lastEntry) * 100
-      const distPassed = distancePct >= minDist
-      results.push({
-        control: 'PRICE_DISTANCE',
-        passed: distPassed,
-        message: distPassed
-          ? `کنترل فاصله قیمت تأیید شد (${fa(distancePct)}٪ ≥ ${fa(minDist)}٪).`
-          : `کنترل فاصله قیمت رد شد — فاصله ${fa(distancePct)}٪ کمتر از حد مجاز ${fa(minDist)}٪ است.`,
-        math: isLong
-          ? `((قیمت ورود قبلی ${fa(lastEntry)} − قیمت فعلی ${fa(ctx.price)}) ÷ ${fa(lastEntry)}) × ۱۰۰ = ${fa(distancePct)}٪`
-          : `((قیمت فعلی ${fa(ctx.price)} − قیمت ورود قبلی ${fa(lastEntry)}) ÷ ${fa(lastEntry)}) × ۱۰۰ = ${fa(distancePct)}٪`,
-      })
+      const knownEntry = sameSide.filter((p) => p.entryPrice != null).at(-1)?.entryPrice ?? null
+      if (knownEntry == null) {
+        // Exchange did not provide an entry price — indeterminable, NEVER
+        // fabricated as zero (mission §1.2.6). Conservative: block entry.
+        results.push({
+          control: 'PRICE_DISTANCE',
+          passed: false,
+          message: 'کنترل فاصله قیمت قابل ارزیابی نیست — قیمت ورود پوزیشن باز از صرافی دریافت نشد.',
+          math: 'قیمت ورود قبلی: نامشخص',
+        })
+      } else {
+        const distancePct = isLong
+          ? ((knownEntry - ctx.price) / knownEntry) * 100
+          : ((ctx.price - knownEntry) / knownEntry) * 100
+        const distPassed = distancePct >= minDist
+        results.push({
+          control: 'PRICE_DISTANCE',
+          passed: distPassed,
+          message: distPassed
+            ? `کنترل فاصله قیمت تأیید شد (${fa(distancePct)}٪ ≥ ${fa(minDist)}٪).`
+            : `کنترل فاصله قیمت رد شد — فاصله ${fa(distancePct)}٪ کمتر از حد مجاز ${fa(minDist)}٪ است.`,
+          math: isLong
+            ? `((قیمت ورود قبلی ${fa(knownEntry)} − قیمت فعلی ${fa(ctx.price)}) ÷ ${fa(knownEntry)}) × ۱۰۰ = ${fa(distancePct)}٪`
+            : `((قیمت فعلی ${fa(ctx.price)} − قیمت ورود قبلی ${fa(knownEntry)}) ÷ ${fa(knownEntry)}) × ۱۰۰ = ${fa(distancePct)}٪`,
+        })
+      }
     }
   }
 

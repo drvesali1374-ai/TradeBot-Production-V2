@@ -1,6 +1,6 @@
-/** Manual close position — order path (auth required). */
+/** Manual close position — order path (auth required). Requires credentials. */
 import { json, jsonError, readJsonBody, requireAuth, isResponse } from '../../_lib'
-import { ToobitClient } from '@/server/exchanges/toobit'
+import { ToobitClient, errorCode } from '@/server/exchanges/toobit'
 import { loadAccountSettings } from '@/server/configuration/settings-service'
 
 export async function POST(req: Request) {
@@ -20,9 +20,11 @@ export async function POST(req: Request) {
       closed: res.closed,
       total: res.total,
       errors: res.errors,
-      mode: client.mode,
     })
   } catch (e) {
-    return json({ success: false, error: e instanceof Error ? e.message : 'خطا', closed: 0, total: 0, errors: [] }, 502)
+    return json(
+      { success: false, error: e instanceof Error ? e.message : 'خطا', code: errorCode(e), closed: 0, total: 0, errors: [] },
+      errorCode(e) === 'NO_CREDENTIALS' ? 200 : 502
+    )
   }
 }

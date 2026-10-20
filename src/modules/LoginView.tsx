@@ -93,9 +93,9 @@ export function LoginView({ onLoggedIn }: { onLoggedIn: (username: string) => vo
           </button>
         </form>
 
-        <div className="login-demo-hint">
-          <b>محیط آزمایشی:</b> نخستین ورود، نام کاربری و رمز شما را به‌عنوان اعتبارنامه ثبت می‌کند (مثلاً <span className="mono">admin / admin123</span>).
-          در استقرار واقعی، متغیرهای <span className="mono">AUTH_USERNAME</span> و <span className="mono">AUTH_PASSWORD</span> را تنظیم کنید.
+        <div className="login-setup-hint">
+          <b>راه‌اندازی اولیه:</b> نخستین ورود، نام کاربری و رمز شما را به‌عنوان اعتبارنامه مدیر ثبت می‌کند.
+          در استقرار واقعی، متغیرهای <span className="mono">AUTH_USERNAME</span> و <span className="mono">AUTH_PASSWORD</span> و <span className="mono">AUTH_SECRET</span> را تنظیم کنید.
         </div>
       </div>
     </div>

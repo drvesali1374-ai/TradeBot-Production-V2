@@ -2,16 +2,18 @@
 
 /**
  * TradeBot v2 — single-page application shell.
- * Views: dashboard / automation / chart / settings (+ login gate).
+ * Views: automation / chart / settings (+ login gate).
+ * The dashboard page was removed from the final interface (mission §7)
+ * — automation IS the main view after login.
  * Execution model (instruction §10.1): NO browser scheduler — automation
- * runs via cloud cron; the ONLY manual trigger is «یک چرخه».
+ * runs via cloud cron; the ONLY manual trigger is «یک چرخه» (automation
+ * view only, mission §7.5).
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AppHeader } from '@/modules/layout/AppHeader'
 import { Sidebar, type ViewId } from '@/modules/layout/Sidebar'
 import { LoginView } from '@/modules/LoginView'
 import { ToastProvider } from '@/modules/common/toast'
-import { DashboardView } from '@/modules/dashboard/DashboardView'
 import { AutomationView } from '@/modules/automation/AutomationView'
 import { ChartView } from '@/modules/chart/ChartView'
 import { SettingsView } from '@/modules/settings/SettingsView'
@@ -19,7 +21,6 @@ import { apiGet, apiPost } from '@/modules/common/api'
 import { useToast } from '@/modules/common/toast'
 
 const VIEW_META: Record<ViewId, { title: string; subtitle: string }> = {
-  dashboard: { title: 'داشبورد', subtitle: 'نمای کلی عملکرد ربات و پورتفوی' },
   automation: { title: 'اتوماسیون', subtitle: 'پنل کنترل و مشاهده چرخه‌های معاملاتی' },
   chart: { title: 'چارت حرفه‌ای', subtitle: 'نمودار تعاملی، سیگنال‌ها و ابزار رسم' },
   settings: { title: 'تنظیمات', subtitle: 'استراتژی، اتصال صرافی و اعلان‌ها' },
@@ -28,11 +29,10 @@ const VIEW_META: Record<ViewId, { title: string; subtitle: string }> = {
 function Shell() {
   const [authState, setAuthState] = useState<'checking' | 'login' | 'ready'>('checking')
   const [username, setUsername] = useState<string | null>(null)
-  const [view, setView] = useState<ViewId>('dashboard')
+  const [view, setView] = useState<ViewId>('automation')
   const [mobileNav, setMobileNav] = useState(false)
   const [running, setRunning] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
-  const [demoMode, setDemoMode] = useState(true)
   const [chartSymbol, setChartSymbol] = useState('BTC')
   const { show } = useToast()
   const toastShown = useRef(false)
@@ -54,14 +54,6 @@ function Shell() {
       alive = false
     }
   }, [])
-
-  // Detect demo/live mode once ready
-  useEffect(() => {
-    if (authState !== 'ready') return
-    apiGet<{ mode?: string }>('/api/account/balance')
-      .then((r) => setDemoMode(r.mode !== 'live'))
-      .catch(() => setDemoMode(true))
-  }, [authState, refreshKey])
 
   const bumpRefresh = useCallback(() => setRefreshKey((k) => k + 1), [])
 
@@ -125,7 +117,7 @@ function Shell() {
   }
 
   const meta = VIEW_META[view]
-  const showRun = view === 'automation' || view === 'dashboard'
+  const showRun = view === 'automation'
 
   return (
     <>
@@ -133,7 +125,6 @@ function Shell() {
         active={view}
         onNavigate={setView}
         username={username}
-        demoMode={demoMode}
         onLogout={handleLogout}
         mobileOpen={mobileNav}
         onCloseMobile={() => setMobileNav(false)}
@@ -147,9 +138,6 @@ function Shell() {
           onOpenMobileNav={() => setMobileNav(true)}
         />
         <div key={`${view}-${refreshKey}`} className="view-enter" style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
-          {view === 'dashboard' ? (
-            <DashboardView refreshKey={refreshKey} onGoChart={(s) => { setChartSymbol(s); setView('chart') }} onRunCycle={runCycle} running={running} />
-          ) : null}
           {view === 'automation' ? (
             <AutomationView refreshKey={refreshKey} onRefreshAll={bumpRefresh} onGoChart={(s) => { setChartSymbol(s); setView('chart') }} onRunCycle={runCycle} running={running} />
           ) : null}
@@ -162,15 +150,9 @@ function Shell() {
             Breakout · صرافی توبیت
           </span>
           <span>
-            {demoMode ? (
-              <span className="badge badge-warning" style={{ fontSize: 10 }}>
-                <span className="badge-dot-sm" /> محیط آزمایشی (بدون کلید API)
-              </span>
-            ) : (
-              <span className="badge badge-success" style={{ fontSize: 10 }}>
-                <span className="badge-dot-sm" /> اتصال زنده توبیت
-              </span>
-            )}
+            <span className="badge badge-info" style={{ fontSize: 10 }}>
+              <span className="badge-dot-sm" /> زمان‌بندی چرخه: کرون ابر (*/۵ دقیقه)
+            </span>
           </span>
         </footer>
       </main>

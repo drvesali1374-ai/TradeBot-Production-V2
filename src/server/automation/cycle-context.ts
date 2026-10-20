@@ -4,7 +4,7 @@
  * engine's persist step flushes only real changes through the batcher.
  */
 import type { AutomationSettings, AccountSettings } from '@/core/settings'
-import type { SymbolEntry, StepLog, CycleLogEntry } from '@/core/types'
+import type { SymbolEntry, StepLog } from '@/core/types'
 import type { WriteBatcher } from '@/server/storage'
 import { STORAGE_KEYS } from '@/server/storage'
 
@@ -17,10 +17,10 @@ export class CycleContext {
   symbols!: SymbolEntry[]
   symbolIndex = -1
 
-  /** Step-by-step trace for the automation panel */
+  /** Step-by-step trace for the automation panel — also the canonical
+   * event stream persisted to the shared log table (one record per step,
+   * batched into a single KV write by persistCycleOutcome). */
   steps: StepLog[] = []
-  /** Human log entries (reference-style Persian messages) */
-  logs: CycleLogEntry[] = []
 
   stepCounter = 0
   private stepStartedAt = 0
@@ -57,10 +57,6 @@ export class CycleContext {
     }
     this.steps.push(log)
     return log
-  }
-
-  log(message: string, type: CycleLogEntry['type'] = 'info', symbol?: string): void {
-    this.logs.push({ message, type, symbol, timestamp: Date.now() })
   }
 
   /* ---------- symbol mutation helpers (in-memory until persist) ----- */

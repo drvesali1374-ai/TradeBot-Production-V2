@@ -1,10 +1,27 @@
 /**
  * ToobitClient — the SINGLE library every exchange call goes through.
  *
- * Live mode (API keys configured): signed requests per endpoints.ts.
- * Demo mode (no keys): market data stays real, account/order operations
- * are simulated via DemoEngine (persisted, TP/SL auto-close with live
- * prices) — clearly flagged with `mode: 'demo'` in results.
+ * Live mode only for account/order operations (signed requests per
+ * endpoints.ts). When API keys are missing, every account/order call
+ * fails fast with the explicit NO_CREDENTIALS error — there is NO
+ * simulated fallback in the product runtime (mission §13).
+ *
+ * Data contract (verified against official Toobit docs —
+ * api-docs.toobit.com/api/usdt-m-account-and-trading.html):
+ *  - GET /api/v1/futures/positions: avgPrice, position (contracts),
+ *    available, leverage, margin, unrealizedPnL (USDT amount),
+ *    profitRate (FRACTION — e.g. "0.003" = 0.3%), markPrice, side.
+ *  - GET /api/v1/futures/historyPositions: realizedPnL (USDT),
+ *    realizedPnlRate (FRACTION — e.g. "0.0042" = 0.42%),
+ *    openAvgPrice / closeAvgPrice (NOT avgPrice), qty/position, id.
+ *  - GET /api/v1/futures/balance: coin, balance, availableBalance,
+ *    positionMargin, orderMargin, crossUnRealizedPnl.
+ *
+ * INTERNAL CONTRACT (single conversion point — normalizePosition /
+ * normalizeHistoryPosition below): all percentage-like rates are
+ * converted from Toobit's FRACTION to PERCENT units here, exactly once.
+ * Everything downstream (UI fmtPct, Bale messages) receives PERCENT
+ * units. Missing/invalid raw fields become null — never fake zeros.
  *
  * Security rules (instruction §6):
  *  - Keys never appear in errors, logs or responses.
@@ -14,9 +31,6 @@
 import type { BalanceInfo, Candle, OpenPosition, ClosedPosition } from '@/core/types'
 import { endpoints, fullSymbol, TOOBIT_BASE_URL, computeOrderQty } from './endpoints'
 import { buildSortedQuery, hmacSha256Hex, RECV_WINDOW_DEFAULT, RECV_WINDOW_POSITIONS, API_KEY_HEADER } from './signing'
-import { demoEngine } from './demo'
-
-export type ToobitMode = 'live' | 'demo'
 
 export interface ToobitCredentials {
   apiKey: string
@@ -28,11 +42,19 @@ export interface ExchangeError extends Error {
   status?: number
 }
 
+/** Human-readable, secret-free message for NO_CREDENTIALS (mission §14). */
+export const NO_CREDENTIALS_MESSAGE = 'اعتبارنامه صرافی تنظیم نشده است'
+
 function exError(code: ExchangeError['code'], message: string, status?: number): ExchangeError {
   const e = new Error(message) as ExchangeError
   e.code = code
   e.status = status
   return e
+}
+
+/** Extract a machine-readable error code from any thrown value. */
+export function errorCode(e: unknown): ExchangeError['code'] | null {
+  return (e as ExchangeError)?.code ?? null
 }
 
 const FETCH_TIMEOUT = 12_000
@@ -50,12 +72,13 @@ async function fetchWithTimeout(url: string, init: RequestInit): Promise<Respons
 export class ToobitClient {
   constructor(private creds: ToobitCredentials) {}
 
-  get mode(): ToobitMode {
-    return this.creds.apiKey && this.creds.secretKey ? 'live' : 'demo'
+  /** Whether signed account/order calls can be made at all. */
+  get hasCredentials(): boolean {
+    return Boolean(this.creds.apiKey && this.creds.secretKey)
   }
 
   /* ---------------------------------------------------------------- */
-  /* Public market data (always live)                                  */
+  /* Public market data (no credentials required)                       */
   /* ---------------------------------------------------------------- */
 
   async getKlines(symbol: string, interval: string, limit: number): Promise<Candle[]> {
@@ -88,7 +111,6 @@ export class ToobitClient {
     const data = (await res.json()) as unknown
     const price = Array.isArray(data) ? Number(data[0]?.p) : Number((data as { price?: string; p?: string }).price ?? (data as { p?: string }).p)
     if (!Number.isFinite(price)) throw exError('BAD_RESPONSE', 'ticker price missing')
-    demoEngine.setPrice(symbol, price)
     return price
   }
 
@@ -127,8 +149,12 @@ export class ToobitClient {
     return res.json()
   }
 
-  private requireLive(): void {
-    if (this.mode !== 'live') throw exError('NO_CREDENTIALS', 'demo mode')
+  /**
+   * Hard gate for every account/order operation: no credentials →
+   * explicit error. No simulated fallback exists (mission §13).
+   */
+  private requireCredentials(): void {
+    if (!this.hasCredentials) throw exError('NO_CREDENTIALS', NO_CREDENTIALS_MESSAGE)
   }
 
   /* ---------------------------------------------------------------- */
@@ -136,57 +162,28 @@ export class ToobitClient {
   /* ---------------------------------------------------------------- */
 
   async getBalance(): Promise<BalanceInfo> {
-    if (this.mode === 'demo') return demoEngine.balance()
+    this.requireCredentials()
     const ep = endpoints.balance(RECV_WINDOW_DEFAULT, 0)
     const data = await this.signedGet(ep.path, ep.query)
     return normalizeBalance(data)
   }
 
   async getOpenPositions(): Promise<OpenPosition[]> {
-    if (this.mode === 'demo') return demoEngine.positions()
+    this.requireCredentials()
     const ep = endpoints.positions(RECV_WINDOW_POSITIONS, 0)
     const data = await this.signedGet(ep.path, ep.query)
-    const arr = arrayFrom(data)
-    return arr.map((p: Record<string, unknown>) => ({
-      symbol: String(p.symbol ?? ''),
-      side: (String(p.side ?? 'LONG').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG') as 'LONG' | 'SHORT',
-      qty: Number(p.position ?? p.qty ?? 0),
-      available: Number(p.available ?? 0),
-      margin: Number(p.margin ?? 0),
-      leverage: Number(p.leverage ?? 1),
-      entryPrice: Number(p.avgPrice ?? p.entryPrice ?? 0),
-      markPrice: Number(p.markPrice ?? 0),
-      unrealizedPnL: Number(p.unrealizedPnL ?? p.unRealizedPnl ?? 0),
-      profitRate: Number(p.profitRate ?? 0),
-    }))
+    return arrayFrom(data).map(normalizePosition)
   }
 
   async getHistoryPositions(): Promise<ClosedPosition[]> {
-    if (this.mode === 'demo') return demoEngine.historyPositions()
+    this.requireCredentials()
     const ep = endpoints.historyPositions(RECV_WINDOW_DEFAULT, 0)
     const data = await this.signedGet(ep.path, ep.query)
-    const arr = arrayFrom(data)
-    return arr
-      .map(
-        (p: Record<string, unknown>): ClosedPosition => ({
-          id: String(p.id ?? ''),
-          symbol: String(p.symbol ?? ''),
-          side: (String(p.side ?? 'LONG').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG') as 'LONG' | 'SHORT',
-          qty: Number(p.qty ?? p.position ?? 0),
-          entryPrice: p.avgPrice != null ? Number(p.avgPrice) : null,
-          closePrice: Number(p.closeAvgPrice ?? 0),
-          closeTime: Number(p.closeTime ?? 0),
-          realizedPnl: Number(p.realizedPnL ?? 0),
-          realizedPnlRate: Number(p.realizedPnlRate ?? 0),
-          leverage: Number(p.leverage ?? 1),
-        })
-      )
-      .sort((a, b) => b.closeTime - a.closeTime)
+    return arrayFrom(data).map(normalizeHistoryPosition).sort((a, b) => b.closeTime - a.closeTime)
   }
 
   async getUserTrades(symbol: string, limit = 100): Promise<unknown[]> {
-    if (this.mode === 'demo') return demoEngine.userTrades(symbol)
-    this.requireLive()
+    this.requireCredentials()
     const timestamp = Date.now()
     const params = { symbol: fullSymbol(symbol), limit, recvWindow: RECV_WINDOW_POSITIONS, timestamp }
     const qs = `symbol=${params.symbol}&limit=${params.limit}&recvWindow=${params.recvWindow}&timestamp=${params.timestamp}`
@@ -202,14 +199,13 @@ export class ToobitClient {
   /* ---------------------------------------------------------------- */
 
   async setLeverage(symbol: string, leverage: number): Promise<void> {
-    if (this.mode === 'demo') return
+    this.requireCredentials()
     const ep = endpoints.leverage({ symbol: fullSymbol(symbol), leverage, recvWindow: RECV_WINDOW_DEFAULT, timestamp: 0 })
     await this.signedPost(ep.path, ep.body as Record<string, string | number>)
   }
 
   /**
-   * Open a position. Returns order info; in demo mode the simulated
-   * position is created with TP/SL attached (single step).
+   * Open a position (signed order + TP/SL trading-stop).
    */
   async openPosition(params: {
     symbol: string
@@ -220,23 +216,9 @@ export class ToobitClient {
     sl: number | null
     clientOrderId: string
   }): Promise<{ orderId: string; qty: number; price: number; tpslConfirmed: boolean; tpslError?: string }> {
+    this.requireCredentials()
     const price = await this.getTickerPrice(params.symbol)
     const qty = computeOrderQty(params.margin, params.leverage, price)
-
-    if (this.mode === 'demo') {
-      const { orderId } = await demoEngine.openPosition({
-        symbol: params.symbol,
-        side: params.side === 'LONG' ? 'LONG' : 'SHORT',
-        qty,
-        margin: params.margin,
-        leverage: params.leverage,
-        price,
-        tp: params.tp,
-        sl: params.sl,
-        clientOrderId: params.clientOrderId,
-      })
-      return { orderId, qty, price, tpslConfirmed: true }
-    }
 
     // Live: leverage first (fire-and-forget preserved, but surfaced in result)
     if (params.leverage > 1) {
@@ -285,21 +267,18 @@ export class ToobitClient {
   }
 
   async closePosition(params: { symbol: string; side: 'LONG' | 'SHORT' }): Promise<{ closed: number; total: number; errors: string[] }> {
-    if (this.mode === 'demo') {
-      const { closed } = await demoEngine.closePosition({ symbol: params.symbol, side: params.side })
-      return { closed, total: closed, errors: [] }
-    }
+    this.requireCredentials()
     const positions = await this.getOpenPositions()
     const target = fullSymbol(params.symbol)
     const targets = positions.filter(
-      (p) => p.symbol.toUpperCase() === target.toUpperCase() && p.side === params.side && (p.available || p.qty) > 0
+      (p) => p.symbol.toUpperCase() === target.toUpperCase() && p.side === params.side && ((p.available ?? p.qty) ?? 0) > 0
     )
     if (targets.length === 0) return { closed: 0, total: 0, errors: [] }
 
     const errors: string[] = []
     let closed = 0
     for (const p of targets) {
-      const qty = Math.ceil(p.available || p.qty)
+      const qty = Math.ceil(p.available || p.qty || 0)
       const ep = endpoints.order({
         symbol: p.symbol,
         side: params.side === 'LONG' ? 'SELL_CLOSE' : 'BUY_CLOSE',
@@ -320,8 +299,72 @@ export class ToobitClient {
 }
 
 /* ---------------------------------------------------------------- */
-/* Response normalizers (reference audit-3 §A master table)          */
+/* Field parsing — strict: missing or invalid becomes null, never     */
+/* a fabricated zero (mission §1.2.6).                               */
 /* ---------------------------------------------------------------- */
+
+function toNum(v: unknown): number | null {
+  if (v == null) return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+/** FRACTION (Toobit raw) → PERCENT (internal contract), or null. */
+function fractionToPercent(v: unknown): number | null {
+  const n = toNum(v)
+  return n == null ? null : n * 100
+}
+
+/* ---------------------------------------------------------------- */
+/* Response normalizers (official docs; see file header) — the ONLY   */
+/* place raw Toobit payloads are converted to internal models.        */
+/* ---------------------------------------------------------------- */
+
+/**
+ * GET /api/v1/futures/positions row → OpenPosition.
+ * profitRate (fraction) is converted to PERCENT units here, exactly
+ * once. All missing/invalid numeric fields become null → the UI shows
+ * «نامشخص» instead of a fake zero (mission §1.2.6).
+ */
+export function normalizePosition(p: Record<string, unknown>): OpenPosition {
+  const side = String(p.side ?? '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG'
+  return {
+    symbol: String(p.symbol ?? ''),
+    side,
+    qty: toNum(p.position ?? p.qty),
+    available: toNum(p.available),
+    margin: toNum(p.margin),
+    leverage: toNum(p.leverage),
+    entryPrice: toNum(p.avgPrice ?? p.entryPrice),
+    markPrice: toNum(p.markPrice),
+    unrealizedPnL: toNum(p.unrealizedPnL ?? p.unRealizedPnl),
+    profitRate: fractionToPercent(p.profitRate),
+    // Toobit's open-position payload does not expose TP/SL (docs) —
+    // keep the fields for future exposure but they stay null here.
+    takeProfit: null,
+    stopLoss: null,
+  }
+}
+
+/**
+ * GET /api/v1/futures/historyPositions row → ClosedPosition.
+ * realizedPnlRate (fraction) → PERCENT; entry price is openAvgPrice.
+ */
+export function normalizeHistoryPosition(p: Record<string, unknown>): ClosedPosition {
+  const side = String(p.side ?? '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG'
+  return {
+    id: String(p.id ?? ''),
+    symbol: String(p.symbol ?? ''),
+    side,
+    qty: toNum(p.qty ?? p.position),
+    entryPrice: toNum(p.openAvgPrice ?? p.avgPrice),
+    closePrice: toNum(p.closeAvgPrice) ?? 0,
+    closeTime: toNum(p.closeTime) ?? 0,
+    realizedPnl: toNum(p.realizedPnL) ?? 0,
+    realizedPnlRate: fractionToPercent(p.realizedPnlRate) ?? 0,
+    leverage: toNum(p.leverage) ?? 1,
+  }
+}
 
 function arrayFrom(data: unknown): Record<string, unknown>[] {
   if (Array.isArray(data)) return data as Record<string, unknown>[]
@@ -343,19 +386,19 @@ function normalizeBalance(data: unknown): BalanceInfo {
     (b) => String(b.asset ?? b.coin ?? b.currency ?? b.symbol ?? '').toUpperCase() === 'USDT'
   )
   if (!usdt) throw exError('NO_USDT', 'no USDT balance row')
-  const total = Number(usdt.balance ?? usdt.total ?? 0)
-  const available = Number(usdt.availableBalance ?? usdt.available ?? 0)
-  const positionMargin = Number(usdt.positionMargin ?? usdt.position_margin ?? 0)
-  const orderMargin = Number(usdt.orderMargin ?? usdt.order_margin ?? usdt.frozen ?? 0)
-  const unrealizedPnL = Number(usdt.crossUnRealizedPnl ?? usdt.unrealizedPnl ?? usdt.unrealized ?? 0)
+  const total = toNum(usdt.balance ?? usdt.total)
+  const available = toNum(usdt.availableBalance ?? usdt.available)
+  const positionMargin = toNum(usdt.positionMargin ?? usdt.position_margin)
+  const orderMargin = toNum(usdt.orderMargin ?? usdt.order_margin ?? usdt.frozen)
+  const unrealizedPnL = toNum(usdt.crossUnRealizedPnl ?? usdt.unrealizedPnl ?? usdt.unrealized)
   return {
     asset: 'USDT',
-    total: round4(total),
-    available: round4(available),
-    free: round4(available - orderMargin),
-    positionMargin: round4(positionMargin),
-    orderMargin: round4(orderMargin),
-    unrealizedPnL: round4(unrealizedPnL),
+    total: round4(total ?? 0),
+    available: round4(available ?? 0),
+    free: round4((available ?? 0) - (orderMargin ?? 0)),
+    positionMargin: round4(positionMargin ?? 0),
+    orderMargin: round4(orderMargin ?? 0),
+    unrealizedPnL: round4(unrealizedPnL ?? 0),
     fetchedAt: Date.now(),
   }
 }

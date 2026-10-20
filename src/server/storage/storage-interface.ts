@@ -35,8 +35,6 @@ export const STORAGE_KEYS = {
   lastCycleResult: 'automationState:lastCycleResult',
   cycleLock: 'automationState:cycleLock',
   logs: 'logs',
-  // Demo-mode simulated exchange state (test environment only)
-  demoState: 'demo:exchange_state',
 } as const
 
 export const LOGS_CAP = 500
