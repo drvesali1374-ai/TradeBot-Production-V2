@@ -1455,3 +1455,28 @@ Work Log:
 Stage Summary:
 - ۵ فایل تغییر یافت: types.ts (+color/DRAW_COLORS)، drawingRender.ts (رنگ، دستگیره، hit-test، کادر LTR)، ChartToolbar.tsx (نماد دلخواه)، ChartView.tsx (انتخاب/درگ/مگنت/پنل ویرایش/auto-size/localStorage/debug hook)، globals.css (کرسر)
 - ابزار اندازه‌گیری اکنون ریاضیاتی قابل اثبات است: قیمت هر دو نقطه در کادر نمایش داده می‌شود و با مگنت همیشه دقیقا روی نوک کندوک قفل می‌شود
+
+---
+Task ID: mission2-analysis
+Agent: main (Z.ai)
+Task: Full audit for 10-phase fix mission (Phases 0-9) — research only, no code written yet
+
+Work Log:
+- Read all UI files: AutomationView.tsx (769L), globals.css (1266L), page.tsx, AppHeader.tsx, Sidebar.tsx, DashboardView.tsx (400L), layout.tsx, LoginView (demo hint line)
+- Read server files: cycle-engine.ts (514L), cycle-context.ts, toobit client/endpoints/demo, storage index/interface, settings-service, all API routes (status/run-cycle/cron/logs/history/balance/positions/symbols/market)
+- Verified PnL contract against OFFICIAL Toobit docs (api-docs.toobit.com rendered via agent-browser):
+  * GET /api/v1/futures/positions fields: symbol, side, avgPrice, position(contracts), available, leverage, lastPrice, positionValue, flp, margin, marginRate("0.4992" for 2x => FRACTION), unrealizedPnL(USDT), profitRate("Profit rate", fraction), realizedPnL, maxNotionalValue, marginType, markPrice
+  * WS account stream sample: up:"12" (unrealizedPnL), pr:"0.003" (profitRate) => FRACTION confirmed
+  * GET historyPositions: realizedPnl("1000"), realizedPnlRate("0.0042") => FRACTION, openAvgPrice/closeAvgPrice (NOT avgPrice), openTime/closeTime, id
+  * GET futures/balance: coin, balance, availableBalance, positionMargin, orderMargin, crossUnRealizedPnl, coupon
+- Cross-checked OLD reference repo (drvesali1374-ai/TradeBot-Production clone): `parseFloat(pos.profitRate||0)*100` then `.toFixed(2)%` => profitRate consumed as FRACTION x100
+- BUG CONFIRMED: v2 getOpenPositions passes raw fraction to fmtPct (percent-units) => 100x error. Also entryPrice in historyPositions maps wrong field (avgPrice vs openAvgPrice). checkClosedPositionsHistory Bale message shows raw realizedPnlRate as % (no x100).
+- Phase 0 findings: .env + db/custom.db + db/trading_data.json ALL TRACKED in git since initial commit b982685 (pushed to GitHub!). trading_data.json contains REAL apiKey(64)/secretKey(64)/baleToken(45)/baleChatId + auth hashes. custom.db = leftover prisma scaffold (User/Post, no secrets). .env has DATABASE_URL only. Secrets present in ALL 6 commits => history purge required.
+- Mobile menu: CSS layering looks correct (sidebar z:100 > backdrop z:99; translateX(100%) hidden / translateX(0) open at <=1024px) => must live-test to root-cause user's invisibility report
+- Sticky: .top-header has NO sticky positioning; unscoped th/td rules (globals.css 605-621) violate user requirement; .view-enter uses slideUp with fill-mode both (potential sticky-breaking ancestor transform)
+- Log system: persistCycleOutcome maps ONLY result.logs (3-5 entries) to LogRecords with action:'automation_cycle' for ALL; result.steps (14 steps, rich data: risk controls, orderId, durations) never persisted => Phase 2 core gap
+- No PAT token on disk (needed for final push; will request or user must provide)
+- Data model changes planned: LogRecord + process/source/durationMs fields (backward-compatible UI fallbacks); CycleResult.demo removed; OpenPosition numeric fields become nullable (null=نامشخص, no fake zeros)
+
+Stage Summary:
+- Complete Phase 0-9 checklist registered in session todos (21 items); evidence-based PnL unit contract established (fraction, x100 for display, single conversion point in ToobitClient.getOpenPositions); execution order: 0(security) -> 7(dashboard removal) -> 6(demo removal) -> 1(tables+PnL) -> 2(log table) -> 3(symbol card+RTL) -> 4(widths) -> 5(header+menu) -> 8(build) -> 9(acceptance+report) -> github push
