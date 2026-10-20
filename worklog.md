@@ -1501,3 +1501,15 @@ Stage Summary:
 - 5 commits: 1fd922f (phase-0 security) → e5e6ef8 (phases 1-7 core) → 32e10be (toNum/fmtUsd/toggle fixes + pnl test) → c5f1d89 (phase-8 build/docs) → latest (clipboard fallback)
 - Deliverables: secret-free history; single PnL contract (fraction→percent, null=نامشخص); unified real-event log table (aggregated KV writes, filterable, copyable cycleId); symbol card; RTL signal chips; sticky header everywhere; working mobile drawer; dashboard+demo fully removed; one official build path (Cloudflare Pages + cron worker)
 - GitHub push pending: PAT token not present in this session — must be provided by owner; force-push required (history rewrite)
+
+---
+Task ID: git-sync
+Agent: orchestrator (main session)
+Task: Push final project state to GitHub repo TradeBot-Production-V2 — replace remote (older parallel-session history) with local final state per owner instruction + provided PAT.
+
+Work Log:
+- Compared local main (top: e154f05 docs(phase-9) 2026-10-20 12:52) vs origin/main after fetch (top: 464a939 feat(chart) 2026-10-19 07:31, force-pushed by a parallel sandbox session)
+- Verified chart module identical between both trees (diff --stat empty) → local is strict superset: phases 0-9 + delivery report + tests + secret-free history
+- Found remote tracks .env (secret leak) → replacement removes it from HEAD
+- Secret scan on local tracked files: clean (no github_pat, no .env tracked)
+- Force-pushed local main to origin/main (owner explicitly requested replacing old files with new ones)
