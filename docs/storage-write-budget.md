@@ -12,7 +12,6 @@
 | automationState:lastPositionCloseTime | number | — |
 | automationState:pendingBaleMessages | array | 50 |
 | logs | array | 500 |
-| demo:exchange_state | object | — |
 
 ## چرخه معمول (بدون معامله)
 | عملیات | خواندن | نوشتن |
