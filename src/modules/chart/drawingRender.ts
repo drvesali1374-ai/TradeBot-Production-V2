@@ -15,7 +15,7 @@
  *    digits — percentage uses the exact TradingView formula:
  *      Δ% = (price2 − price1) / price1 × 100   (signed, base = FIRST point)
  */
-import { fmtNum } from '@/modules/common/format'
+import { fmtDateTime, fmtNum } from '@/modules/common/format'
 import type { ChartPalette } from './chartTheme'
 import type { Drawing, DrawingDraft } from './types'
 
@@ -55,14 +55,11 @@ export function fmtDuration(ms: number): string {
   return `${Math.round(abs / 86_400_000)} روز`
 }
 
-/** Short fa-IR date+time for the vertical-line tag. */
+/** Full central Jalali datetime (mission §4) for the vertical-line tag —
+ *  `YYYY/MM/DD, HH:mm:ss` with Persian digits; seconds always present.
+ *  Digits are plain unicode chars, so canvas LTR text renders them fine. */
 export function fmtBarTime(timeSec: number): string {
-  return new Date(timeSec * 1000).toLocaleString('fa-IR', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
+  return fmtDateTime(timeSec * 1000)
 }
 
 /* ------------------------------------------------------------------ */

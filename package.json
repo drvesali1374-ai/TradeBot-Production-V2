@@ -13,7 +13,7 @@
     "db:reset": "prisma migrate reset",
     "build:pages": "npx @cloudflare/next-on-pages@latest",
     "test:pnl": "bun run tests/pnl-mapping.test.ts",
-    "test": "bun run tests/pnl-mapping.test.ts && bun run tests/tpsl-mapping.test.ts && bun run tests/symbol-stats.test.ts && bun run tests/fidelity.test.ts"
+    "test": "bun run tests/pnl-mapping.test.ts && bun run tests/tpsl-mapping.test.ts && bun run tests/symbol-stats.test.ts && bun run tests/fidelity.test.ts && bun run tests/datetime-format.test.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

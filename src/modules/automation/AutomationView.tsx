@@ -22,7 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiGet, apiPost } from '@/modules/common/api'
 import { useToast } from '@/modules/common/toast'
 import { DataTable, type DataColumn } from '@/modules/common/DataTable'
-import { fmtNum, fmtPrice, fmtUsd, fmtPct, fmtTime, fmtDateTime, fmtAgo, fmtQty, pnlColor, shortSymbol } from '@/modules/common/format'
+import { fmtNum, fmtPrice, fmtUsd, fmtPct, fmtTime, fmtDateTime, fmtQty, pnlColor, shortSymbol } from '@/modules/common/format'
 import type { CycleResult, SymbolEntry, OpenPosition, LogRecord, BalanceInfo, Signal, LogStatus } from '@/core/types'
 
 /* ------------------------------------------------------------------ */
@@ -698,9 +698,11 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onRunCycle
     {
       key: 'lastCycle',
       header: 'آخرین چرخه',
-      width: '110px',
+      width: '165px',
       align: 'end',
-      render: (s) => <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>{s.lastCycleTime ? fmtAgo(s.lastCycleTime) : '—'}</span>,
+      // mission §9.2 — symbols table shows the FULL Jalali datetime with seconds
+      // (fmtAgo was here before; relative age replaced by fmtDateTime per §4)
+      render: (s) => <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>{fmtDateTime(s.lastCycleTime)}</span>,
     },
     {
       key: 'remove',

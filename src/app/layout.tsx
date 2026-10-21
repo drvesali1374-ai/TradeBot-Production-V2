@@ -28,10 +28,8 @@ export default function RootLayout({
   return (
     <html lang="fa" dir="rtl" suppressHydrationWarning>
       <head>
-        <link
-          rel="stylesheet"
-          href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css"
-        />
+        {/* Vazirmatn is self-hosted (public/fonts + @font-face in globals.css) —
+            no CDN request, mission §5 (offline / Iran-safe). */}
         {/* theme applied before paint to avoid flash */}
         <script
           dangerouslySetInnerHTML={{
