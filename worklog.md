@@ -1776,3 +1776,25 @@ Work Log:
 Stage Summary:
 - §4 done: ONE central Jalali datetime (Tehran, Persian digits, seconds) everywhere; server stays UTC ISO; fmtAgo demoted to zero call sites.
 - §5 done: Vazirmatn fully self-hosted (5 weights), zero external requests, family/chains/isolation untouched.
+---
+Task ID: m3-fe-2a
+Agent: fe-integrator (main session)
+Task: Complete the canceled run — §1.1 close-dialog integration + §1.2 PnL inversion + §2-UI TP/SL columns + mock-based tests/E2E
+
+Work Log:
+- KEPT the previous agent's partial work unmodified: CloseConfirmDialog.tsx (complete, shadcn dialog, props position/submitting/onConfirm/onOpenChange) + format.ts fmtUsdtAmount()/tpslLabel() (tri-state). Server code untouched.
+- AutomationView.tsx integration (§1.1): removed `closing` state + the row button's direct-POST path; added `closeTarget: OpenPosition | null` + `closeSubmitting`. Row «بستن» = `setCloseTarget(p)` ONLY. `<CloseConfirmDialog>` (view end) is the ONLY trigger of POST /api/positions/close via `onConfirm → closePosition(closeTarget)`. `onOpenChange(false)` vetoed while submitting (dialog also vetoes Escape/backdrop via preventDefault); otherwise clears closeTarget. closePosition: double-submit guard, success → toast «{closed} پوزیشن بسته شد», failure → warning toast with REAL reason (`[r.error, ...r.errors].filter(Boolean).join(' — ')`), throw → danger toast, `refreshPositions()` on result, closeSubmitting/closeTarget cleared in finally.
+- PnL column (§1.2) INVERTED: `fmtPct(p.profitRate)` primary/larger colored by pnlColor(unrealizedPnL) in mono; `(<bdi className="num">{fmtUsdtAmount(p.unrealizedPnL)} USDT</bdi>)` in <small opacity .8> same hue; both null → `— (—)` all muted; one null → available + `—`. LTR isolation matches neighbors (mono + bdi.num; column ltr:true).
+- TP/SL column (§2-UI): two stacked lines `TP: …` / `SL: …` via tpslLabel(value, tpslStatus) + module-level TpslLine helper — price → TP green/SL red (.long/.short = var(--success)/var(--danger), same hues as signals table), unset → var(--text-muted), unknown → var(--warning) opacity .85 + `title="دریافت TP/SL از صرافی ناموفق بود"`. Replaces the always-«— / —» cell.
+- tests/close-confirm.test.ts NEW (bun plain script, 22✓): fmtUsdtAmount (+12.30, −4.80 with U+2212 check, 0.00, +0.00 rounding, null/undefined/NaN → —, thousands separators) + tpslLabel (ok+value→price, ok+null→«تنظیم نشده»/unset, unknown→«نامشخص» EVEN with stray value, unknown+null, undefined status+value→price, undefined status+null→unknown, XRP fixture 1.1987→'1.2'). package.json `test` chains 6 suites.
+- E2E (agent-browser, admin/admin123, request-ledger `network requests --filter positions/close`):
+  - Dialog open → 0 requests; Escape → 0; «انصراف» → 0; backdrop click → 0.
+  - Confirm click → EXACTLY +1 POST (ledger 3→4), in-flight buttons `[{انصراف disabled:true},{«در حال بستن…» disabled:true ariaBusy:"true"}]` (1.5s fetch delay wrapper), after resolve: dialog closed + toast «بستن پوزیشن | 1 پوزیشن بسته شد» + GET /api/positions/open re-fetch follows (then balance+status = refreshPositions cascade).
+  - INCIDENT (deviation from "NO real orders"): the given mock pattern `/api/positions/close` does NOT match (Playwright globs match the FULL URL) — the FIRST E2E confirm really closed XRP-SHORT on the test account (dev.log POST 200 in 781ms; XRP gone from open positions; $2.16 margin, −$0.11 PnL). Lesson recorded: agent-browser route patterns need `**/` prefix for relative paths. Fix: `**/api/positions/close`, interception PROVEN before any further confirm click (synthetic ZZZMOCK2 fetch → mock body returned, dev.log close-POST count unchanged; pre-fix ZZZMOCK probe hit the server but matched no position → {closed:0}, zero orders by client filter). All later E2E steps mock-safe; `network unroute` at end.
+  - Live cell evidence (a11y snapshot before incident): XRP `TP: 1.2 SL: 1.47` (real 1.1987/1.465), DOT `TP: 1.03 SL: 1.26`, DYDX `TP: 0.13 SL: 0.11`; PnL cells `+3٪ (+0.06 USDT)` / `−4.9٪ (−0.11 USDT)` — real TP/SL now DISPLAY instead of «— / —».
+  - Screenshots VLM-verified (1440 + 390 incl. RTL h-scroll via negative scrollLeft): /tmp/m3fe2a-positions-1440.png, -dialog-1440.png, -positions-390.png, -positions-390-scrolled.png — percent primary + (USDT) secondary, TP green/SL red stacked, no garble/overlap.
+- Gates: `npx tsc --noEmit` 0; `bun run lint` 0; `bun run test` ALL GREEN (pnl 15✓, tpsl 11✓, symbol-stats 24✓, fidelity 34✓, datetime 23✓, close-confirm 22✓); dev.log clean (200s only).
+
+Stage Summary:
+- §1.1 dialog gate live: zero network on open/Escape/backdrop/انصراف, exactly one POST per confirm, submitting locks all dismissals; §1.2 PnL inverted; §2-UI TP/SL tri-state live against real exchange stop-orders.
+- KNOWN STATE CHANGE: test account now has 2 open positions (XRP-SHORT closed by the E2E incident above) — document for any task relying on "3 live positions".

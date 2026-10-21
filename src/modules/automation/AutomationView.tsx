@@ -22,8 +22,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiGet, apiPost } from '@/modules/common/api'
 import { useToast } from '@/modules/common/toast'
 import { DataTable, type DataColumn } from '@/modules/common/DataTable'
-import { fmtNum, fmtPrice, fmtUsd, fmtPct, fmtTime, fmtDateTime, fmtQty, pnlColor, shortSymbol } from '@/modules/common/format'
+import { fmtNum, fmtPrice, fmtUsd, fmtPct, fmtTime, fmtDateTime, fmtQty, pnlColor, shortSymbol, fmtUsdtAmount, tpslLabel, type TpslLabel } from '@/modules/common/format'
 import type { CycleResult, SymbolEntry, OpenPosition, LogRecord, BalanceInfo, Signal, LogStatus } from '@/core/types'
+import { CloseConfirmDialog } from '@/modules/automation/CloseConfirmDialog'
 
 /* ------------------------------------------------------------------ */
 /* shared bits                                                         */
@@ -117,6 +118,35 @@ const SOURCE_LABELS: Record<string, string> = {
 /** «نامشخص» marker — used whenever the exchange did not send a value. */
 const UNKNOWN = '—'
 
+/**
+ * One TP/SL table line (mission §2.2 — tri-state, never conflated):
+ *  - 'price'   → real stop-order price → TP green (long) / SL red (short),
+ *               same hues as the signals table TP/SL columns
+ *  - 'unset'   → read-back OK + no order → «تنظیم نشده» (muted)
+ *  - 'unknown' → read-back FAILED → «نامشخص» (warning-ish) + tooltip why
+ */
+function TpslLine({ label, info, hue }: { label: string; info: TpslLabel; hue: 'long' | 'short' }) {
+  if (info.kind === 'unknown') {
+    return (
+      <span style={{ color: 'var(--warning)', opacity: 0.85 }} title="دریافت TP/SL از صرافی ناموفق بود">
+        {label}: {info.text}
+      </span>
+    )
+  }
+  if (info.kind === 'unset') {
+    return (
+      <span style={{ color: 'var(--text-muted)' }}>
+        {label}: {info.text}
+      </span>
+    )
+  }
+  return (
+    <span className={hue}>
+      {label}: {info.text}
+    </span>
+  )
+}
+
 function CredentialsBox() {
   return (
     <div className="badge badge-warning" style={{ width: '100%', justifyContent: 'flex-start', padding: '12px 14px', borderRadius: 12, gap: 8 }}>
@@ -184,7 +214,12 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onRunCycle
 
   const [newSymbol, setNewSymbol] = useState('')
   const [symbolBusy, setSymbolBusy] = useState(false)
-  const [closing, setClosing] = useState<string | null>(null)
+
+  // close-confirm flow (mission §1.1): the row «بستن» button ONLY selects a
+  // target — the CloseConfirmDialog is the single gate that may fire the
+  // real POST /api/positions/close (via onConfirm below).
+  const [closeTarget, setCloseTarget] = useState<OpenPosition | null>(null)
+  const [closeSubmitting, setCloseSubmitting] = useState(false)
 
   const [cycleDetailsOpen, setCycleDetailsOpen] = useState(false)
 
@@ -334,22 +369,34 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onRunCycle
     }
   }
 
+  /** The ONLY network-triggering path — called by the dialog's «بستن پوزیشن». */
   const closePosition = async (pos: OpenPosition) => {
+    if (closeSubmitting) return // double-submit guard (dialog disables too)
     const sym = shortSymbol(pos.symbol)
     const direction = pos.side === 'LONG' ? 'long' : 'short'
-    setClosing(pos.symbol + pos.side)
+    setCloseSubmitting(true)
     try {
-      const r = await apiPost<{ success: boolean; closed: number; total: number; error?: string }>('/api/positions/close', { symbol: sym, direction })
-      show(
-        'بستن پوزیشن',
-        r.success ? `${sym} ${pos.side === 'LONG' ? 'لانگ' : 'شورت'} بسته شد` : r.error || 'پوزیشنی برای بستن یافت نشد',
-        r.success ? 'success' : 'warning'
-      )
+      const r = await apiPost<{
+        success: boolean
+        closed: number
+        total: number
+        error?: string
+        errors?: string[]
+      }>('/api/positions/close', { symbol: sym, direction })
+      if (r.success) {
+        show('بستن پوزیشن', `${r.closed} پوزیشن بسته شد`, 'success')
+      } else {
+        // the REAL server reason — never a generic fallback while the
+        // server sent anything (errors[] joined, else error message)
+        const detail = [r.error, ...(r.errors ?? [])].filter(Boolean).join(' — ')
+        show('بستن پوزیشن', detail || 'پوزیشنی برای بستن یافت نشد', 'warning')
+      }
       refreshPositions()
     } catch (e) {
       show('بستن پوزیشن', e instanceof Error ? e.message : 'خطا', 'danger')
     } finally {
-      setClosing(null)
+      setCloseSubmitting(false)
+      setCloseTarget(null)
     }
   }
 
@@ -623,11 +670,22 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onRunCycle
       align: 'end',
       ltr: true,
       render: (p) => {
-        if (p.unrealizedPnL == null && p.profitRate == null) return <span style={{ color: 'var(--text-muted)' }}>{UNKNOWN}</span>
+        // mission §1.2 (inverted per spec): PERCENT is the primary/larger
+        // figure; the USDT amount is the secondary, smaller (opacity ~0.8)
+        // same-hue detail in parentheses. Both null → `— (—)` all muted.
+        if (p.unrealizedPnL == null && p.profitRate == null) {
+          return (
+            <span style={{ color: 'var(--text-muted)' }}>
+              {UNKNOWN} ({UNKNOWN})
+            </span>
+          )
+        }
         return (
           <span className="mono" style={{ color: pnlColor(p.unrealizedPnL) }}>
-            {p.unrealizedPnL != null ? fmtUsd(p.unrealizedPnL) : UNKNOWN}{' '}
-            <small>({p.profitRate != null ? fmtPct(p.profitRate) : UNKNOWN})</small>
+            {p.profitRate != null ? fmtPct(p.profitRate) : UNKNOWN}{' '}
+            <small style={{ opacity: 0.8 }}>
+              (<bdi className="num">{p.unrealizedPnL != null ? `${fmtUsdtAmount(p.unrealizedPnL)} USDT` : UNKNOWN}</bdi>)
+            </small>
           </span>
         )
       },
@@ -638,12 +696,20 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onRunCycle
       width: '150px',
       align: 'end',
       ltr: true,
-      render: (p) => (
-        <span style={{ fontSize: 11 }} className="mono">
-          {p.takeProfit != null ? <span className="long">{fmtPrice(p.takeProfit)}</span> : UNKNOWN} /{' '}
-          {p.stopLoss != null ? <span className="short">{fmtPrice(p.stopLoss)}</span> : UNKNOWN}
-        </span>
-      ),
+      render: (p) => {
+        // mission §2-UI: two stacked tri-state lines (never «— / —» blindly)
+        const tp = tpslLabel(p.takeProfit, p.tpslStatus)
+        const sl = tpslLabel(p.stopLoss, p.tpslStatus)
+        return (
+          <span
+            className="mono"
+            style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2, fontSize: 11 }}
+          >
+            <TpslLine label="TP" info={tp} hue="long" />
+            <TpslLine label="SL" info={sl} hue="short" />
+          </span>
+        )
+      },
     },
     {
       key: 'actions',
@@ -654,11 +720,10 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onRunCycle
         <button
           type="button"
           className="btn btn-danger btn-sm"
-          onClick={() => closePosition(p)}
-          disabled={closing === p.symbol + p.side}
+          onClick={() => setCloseTarget(p)}
           aria-label={`بستن پوزیشن ${shortSymbol(p.symbol)}`}
         >
-          <i className={`ph ${closing === p.symbol + p.side ? 'ph-circle-notch spin' : 'ph-x'}`} aria-hidden />
+          <i className="ph ph-x" aria-hidden />
           <span>بستن</span>
         </button>
       ),
@@ -1241,6 +1306,24 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onRunCycle
           }
         />
       </section>
+
+      {/* ============ close-confirm gate (mission §1.1) ============ */}
+      {/* The ONLY trigger of POST /api/positions/close. Escape / backdrop /
+          «انصراف» just clear the target — zero network activity. */}
+      <CloseConfirmDialog
+        position={closeTarget}
+        submitting={closeSubmitting}
+        onConfirm={() => {
+          if (closeTarget) void closePosition(closeTarget)
+        }}
+        onOpenChange={(open) => {
+          // opening is driven ONLY by the row «بستن» buttons (setCloseTarget)
+          if (open) return
+          // veto Escape / backdrop / «انصراف» while the close POST is in flight
+          if (closeSubmitting) return
+          setCloseTarget(null)
+        }}
+      />
     </div>
   )
 }

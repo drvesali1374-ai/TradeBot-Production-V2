@@ -39,6 +39,55 @@ export function fmtPct(n: number | null | undefined, digits = 1): string {
   return `${sign}${fmtNum(Math.abs(n), digits)}٪`
 }
 
+/**
+ * Signed USDT amount WITHOUT the `$` prefix (mission §1.2 — PnL column
+ * parentheses): `+12.30` / `−4.80` / `0.00` (no sign for exact zero —
+ * same convention as fmtUsd/fmtPct); null/undefined/NaN → `'—'`.
+ * The unit «USDT» is appended by the caller's JSX.
+ * en-US Latin digits, thousands separators, exactly 2 fraction digits.
+ */
+export function fmtUsdtAmount(n: number | null | undefined): string {
+  if (n == null || Number.isNaN(n)) return '—'
+  const sign = n > 0 ? '+' : n < 0 ? '−' : ''
+  const abs = Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return `${sign}${abs}`
+}
+
+/* ------------------------------------------------------------------ */
+/* TP/SL tri-state display (mission §2.2 — never conflate)               */
+/* ------------------------------------------------------------------ */
+
+export type TpslLabelKind = 'price' | 'unset' | 'unknown'
+
+export interface TpslLabel {
+  /** ready-to-render text: formatted price, «تنظیم نشده» or «نامشخص» */
+  text: string
+  /**
+   * 'price'   → real TP/SL price from a successful read-back (green/red)
+   * 'unset'   → read-back OK + no order → genuinely «تنظیم نشده» (muted)
+   * 'unknown' → read-back FAILED → «نامشخص» (warning-ish, distinct)
+   */
+  kind: TpslLabelKind
+}
+
+/**
+ * Tri-state TP/SL label (mission §2.2). The caller colors by `kind`:
+ * price → long/short hue, unset → muted, unknown → warning-ish muted.
+ *
+ *  - status 'unknown'  → «نامشخص» ALWAYS (read-back failed; a stray value
+ *    must not be trusted or conflated with "not set")
+ *  - status 'ok'       → price when the stop order exists, else «تنظیم نشده»
+ *  - status undefined/null (defensive, not in the live contract) → a value
+ *    is shown when present, otherwise «نامشخص» — without a successful
+ *    read-back we may NOT claim «تنظیم نشده».
+ */
+export function tpslLabel(value: number | null | undefined, status?: 'ok' | 'unknown' | null): TpslLabel {
+  if (status === 'unknown') return { text: 'نامشخص', kind: 'unknown' }
+  if (value != null && !Number.isNaN(value)) return { text: fmtPrice(value), kind: 'price' }
+  if (status === 'ok') return { text: 'تنظیم نشده', kind: 'unset' }
+  return { text: 'نامشخص', kind: 'unknown' }
+}
+
 /* ------------------------------------------------------------------ */
 /* Date/time — central Jalali formatting (mission §4)                     */
 /* ------------------------------------------------------------------ */
