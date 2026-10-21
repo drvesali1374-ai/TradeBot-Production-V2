@@ -19,6 +19,7 @@ import { ChartView } from '@/modules/chart/ChartView'
 import { SettingsView } from '@/modules/settings/SettingsView'
 import { apiGet, apiPost } from '@/modules/common/api'
 import { useToast } from '@/modules/common/toast'
+import type { SymbolStatsPayload } from '@/modules/automation/SymbolStatsTable'
 
 const VIEW_META: Record<ViewId, { title: string; subtitle: string }> = {
   automation: { title: 'اتوماسیون', subtitle: 'پنل کنترل و مشاهده چرخه‌های معاملاتی' },
@@ -34,6 +35,10 @@ function Shell() {
   const [running, setRunning] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
   const [chartSymbol, setChartSymbol] = useState('BTC')
+  // §8-UI — per-symbol closed-trade stats: fetched once per mount and
+  // re-fetched on EVERY refreshKey bump (covers «after each cycle run» —
+  // runCycle bumps the key via bumpRefresh). Shared by Sidebar + AutomationView.
+  const [symbolStats, setSymbolStats] = useState<SymbolStatsPayload | null>(null)
   const { show } = useToast()
   const toastShown = useRef(false)
 
@@ -56,6 +61,25 @@ function Shell() {
   }, [])
 
   const bumpRefresh = useCallback(() => setRefreshKey((k) => k + 1), [])
+
+  // §8-UI stats fetch — read-only; NO_CREDENTIALS comes back as
+  // success:false (HTTP 200) so the UI shows «خطای دریافت آمار» without
+  // throwing; a network failure also degrades to success:false. Retry
+  // happens on the next refreshKey bump — never fake zeros (mission §8.3).
+  useEffect(() => {
+    if (authState !== 'ready') return
+    let alive = true
+    apiGet<SymbolStatsPayload>('/api/diagnostics/symbol-stats')
+      .then((r) => {
+        if (alive) setSymbolStats(r)
+      })
+      .catch(() => {
+        if (alive) setSymbolStats({ success: false, stats: [], error: 'خطای شبکه' })
+      })
+    return () => {
+      alive = false
+    }
+  }, [authState, refreshKey])
 
   const handleLoggedIn = useCallback((name: string) => {
     setUsername(name)
@@ -128,6 +152,7 @@ function Shell() {
         onLogout={handleLogout}
         mobileOpen={mobileNav}
         onCloseMobile={() => setMobileNav(false)}
+        symbolStats={symbolStats}
       />
       <main className="main-content">
         <AppHeader
@@ -139,7 +164,7 @@ function Shell() {
         />
         <div key={`${view}-${refreshKey}`} className="view-enter" style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
           {view === 'automation' ? (
-            <AutomationView refreshKey={refreshKey} onRefreshAll={bumpRefresh} onGoChart={(s) => { setChartSymbol(s); setView('chart') }} onRunCycle={runCycle} running={running} />
+            <AutomationView refreshKey={refreshKey} onRefreshAll={bumpRefresh} onGoChart={(s) => { setChartSymbol(s); setView('chart') }} onRunCycle={runCycle} running={running} symbolStats={symbolStats} />
           ) : null}
           {view === 'chart' ? <ChartView initialSymbol={chartSymbol} onSymbolChange={setChartSymbol} /> : null}
           {view === 'settings' ? <SettingsView onSaved={bumpRefresh} /> : null}

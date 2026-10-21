@@ -57,7 +57,7 @@
   --shadow-lg: 0 20px 48px -12px rgba(15, 23, 42, 0.14);
   --shadow-xl: 0 28px 64px -16px rgba(15, 23, 42, 0.18);
   --glow: 0 0 0 4px var(--accent-glow);
-  --sidebar-width: 272px;
+  --sidebar-width: 320px;
 
   /* shadcn compat (light) */
   --background: var(--bg-body);
@@ -290,6 +290,18 @@ a { color: inherit; text-decoration: none; }
   padding-top: 14px;
   margin-top: 10px;
 }
+
+/* §8-UI — per-symbol trade-stats section inside the sidebar/drawer.
+   The inner DataTable brings its own scrollport (max-height 300) with a
+   sticky thead, so this block only frames it; the flex nav above shrinks
+   on short viewports (it has overflow-y:auto → automatic min-height 0). */
+.sidebar-stats {
+  border-top: 1px solid var(--border-color);
+  margin-top: 6px;
+  padding: 8px 2px 4px;
+  flex-shrink: 0;
+}
+.sidebar-stats .nav-section-label { padding: 6px 10px 8px; }
 .user-card {
   display: flex;
   align-items: center;
@@ -612,15 +624,26 @@ a { color: inherit; text-decoration: none; }
 /* ---------------- tables ---------------- */
 
 /*
- * Content grid (mission §10) — wider side column (minmax-guarded) with
- * an unsqueezable main column; the full-width log table lives OUTSIDE
- * this grid in its own section.
+ * Top grid (mission §9) — desktop layout of the automation view's top:
+ * «نمادها و زمان‌بندی» ≈ 1fr (right, RTL) | §3 unified cycle+log ≈ 2fr.
+ * Stacks full-width ≤1280px (the app's established tablet breakpoint,
+ * same as the old .content-grid) so the 1fr symbols panel never gets
+ * squeezed below its compact-table floor (~300px) at laptop widths.
  */
-.content-grid {
+.top-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 380px);
+  grid-template-columns: minmax(300px, 1fr) minmax(0, 2fr);
   gap: 18px;
-  margin-bottom: 22px;
+  align-items: start;
+  margin-bottom: 18px;
+}
+
+/* §8-UI — in-page twin of the sidebar stats table. The sidebar is
+   off-canvas at ≤1024px (drawer), so exactly below that width the
+   automation main column carries the stats panel instead; at ≥1025px
+   the SIDEBAR carries it — never both. */
+@media (min-width: 1025px) {
+  .stats-inpage { display: none; }
 }
 
 .table-card { padding: 0; overflow: hidden; }
@@ -686,6 +709,17 @@ table.tb-table {
 .tb-table tbody tr[data-expanded='true'] td { background: var(--bg-hover); }
 .tb-empty-row td { text-align: center; }
 
+/* compact tables (mission §9.2/§10) — tighter cell rhythm so the symbols
+   (1fr top-grid panel), sidebar stats and unified log tables fit their
+   columns without horizontal scroll at desktop widths. */
+.tb-table.tb-compact th,
+.tb-table.tb-compact td { padding: 7px 8px; }
+.tb-table.tb-compact th { font-size: 10.5px; letter-spacing: 0.2px; }
+
+/* §3.2 — subtle accent for rows of the cycle shown in the summary header:
+   a thin accent bar on the row's leading (RIGHT in RTL) edge only. */
+.tb-table tbody tr.tb-row-current > td:first-child { box-shadow: inset -3px 0 0 0 var(--accent); }
+
 /* expanded technical-details row (log table, mission §5) */
 .tb-details-row > td {
   background: var(--bg-hover);
@@ -735,6 +769,38 @@ table.tb-table {
   margin-bottom: 12px;
 }
 .log-toolbar .form-input { width: auto; padding: 7px 11px; font-size: 12px; }
+
+/* §3.1 compact last-cycle summary header (unified cycle+log panel) */
+.cycle-summary {
+  border: 1px dashed var(--border-color);
+  border-radius: 12px;
+  padding: 10px 12px 12px;
+  margin-bottom: 12px;
+}
+.cycle-summary-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  align-items: center;
+}
+.cycle-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.cycle-chip-label {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+.cycle-summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
 
 /* asset-info / mono / num */
 .asset-info { display: flex; align-items: center; gap: 12px; }
@@ -788,7 +854,8 @@ table.tb-table {
 
 /* ---------------- side panels / activity ---------------- */
 
-.side-panel { display: flex; flex-direction: column; gap: 16px; }
+/* ---------------- side panels — REMOVED (mission §9 layout audit) ----------------
+   .side-panel had zero call sites after the top-grid restructure. */
 
 .panel-card { padding: 18px; }
 .panel-title {
@@ -1088,13 +1155,13 @@ input[type='checkbox'] { accent-color: var(--accent); width: 16px; height: 16px;
 }
 
 .stats-grid .card,
-.content-grid > * { animation: slideUp 0.5s cubic-bezier(0.4, 0, 0.2, 1) both; }
+.top-grid > * { animation: slideUp 0.5s cubic-bezier(0.4, 0, 0.2, 1) both; }
 .stats-grid .card:nth-child(1) { animation-delay: 0.04s; }
 .stats-grid .card:nth-child(2) { animation-delay: 0.09s; }
 .stats-grid .card:nth-child(3) { animation-delay: 0.14s; }
 .stats-grid .card:nth-child(4) { animation-delay: 0.19s; }
-.content-grid > *:nth-child(1) { animation-delay: 0.24s; }
-.content-grid > *:nth-child(2) { animation-delay: 0.30s; }
+.top-grid > *:nth-child(1) { animation-delay: 0.24s; }
+.top-grid > *:nth-child(2) { animation-delay: 0.30s; }
 
 .view-enter { animation: slideUp 0.4s cubic-bezier(0.4, 0, 0.2, 1) both; }
 
@@ -1192,63 +1259,9 @@ input[type='checkbox'] { accent-color: var(--accent); width: 16px; height: 16px;
 }
 [data-theme="dark"] .tool-btn.active { color: #a5b4fc; }
 
-/* ---------------- log timeline ---------------- */
-
-.log-timeline { position: relative; padding-right: 18px; max-height: 420px; overflow-y: auto; }
-.log-timeline::before {
-  content: '';
-  position: absolute;
-  right: 5px;
-  top: 6px;
-  bottom: 6px;
-  width: 2px;
-  background: var(--border-color);
-}
-.log-tl-item { position: relative; padding: 7px 14px 7px 0; }
-.log-tl-item::before {
-  content: '';
-  position: absolute;
-  right: -17px;
-  top: 13px;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--text-muted);
-  border: 2px solid var(--bg-card);
-}
-.log-tl-item.success::before { background: var(--success); }
-.log-tl-item.warning::before { background: var(--warning); }
-.log-tl-item.error::before { background: var(--danger); }
-.log-tl-msg { font-size: 12.5px; }
-.log-tl-time { font-size: 10.5px; color: var(--text-muted); }
-
-/* ---------------- step list (cycle result) ---------------- */
-
-.step-item {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border-soft);
-  font-size: 12.5px;
-}
-.step-item:last-child { border-bottom: none; }
-.step-num {
-  width: 22px; height: 22px;
-  border-radius: 7px;
-  background: var(--bg-hover);
-  color: var(--text-secondary);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  font-weight: 700;
-  flex-shrink: 0;
-}
-.step-item[data-status='ok'] .step-num { background: var(--success-soft); color: var(--success); }
-.step-item[data-status='failed'] .step-num { background: var(--danger-soft); color: var(--danger); }
-.step-item[data-status='warning'] .step-num { background: var(--warning-soft); color: var(--warning); }
-.step-item[data-status='skipped'] .step-num { background: var(--bg-hover); color: var(--text-muted); }
+/* ---------------- log timeline — REMOVED (mission §3 merge, §10 audit) ----------------
+   Dead CSS: the old .log-timeline/.log-tl-* rules had ZERO call sites after
+   the unified event table (DataTable) replaced every timeline rendering. */
 
 /* ---------------- misc app ---------------- */
 
@@ -1258,6 +1271,12 @@ input[type='checkbox'] { accent-color: var(--accent); width: 16px; height: 16px;
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
+}
+/* full-width 4-KPI strip (balance & risk panel, mission §9) — collapses
+   to 2 columns on narrow screens (with the base kpi-grid media rules) */
+.kpi-grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 900px) {
+  .kpi-grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .kpi-box {
   background: var(--bg-hover);
@@ -1369,10 +1388,13 @@ input[type='checkbox'] { accent-color: var(--accent); width: 16px; height: 16px;
   color: var(--text-muted);
 }
 
-/* tooltip */
+/* tooltip — §10 audit fix: the ::after must NOT exist (zero-size) until
+   hover. With permanent `content: attr(...)` the nowrap pseudo extended
+   past small buttons inside table cells and inflated .table-scroll's
+   scrollWidth (phantom horizontal scrollbars at non-hover state). */
 [data-tooltip] { position: relative; }
 [data-tooltip]::after {
-  content: attr(data-tooltip);
+  content: '';
   position: absolute;
   bottom: calc(100% + 8px);
   left: 50%;
@@ -1389,7 +1411,7 @@ input[type='checkbox'] { accent-color: var(--accent); width: 16px; height: 16px;
   transition: all 0.2s;
   z-index: 50;
 }
-[data-tooltip]:hover::after { opacity: 1; transform: translateX(-50%) scale(1); }
+[data-tooltip]:hover::after { content: attr(data-tooltip); opacity: 1; transform: translateX(-50%) scale(1); }
 
 /* sidebar backdrop (mobile) */
 .sidebar-backdrop {
@@ -1409,8 +1431,15 @@ body.nav-drawer-open { overflow: hidden; }
 /* ---------------- responsive ---------------- */
 
 @media (max-width: 1280px) {
-  .content-grid { grid-template-columns: 1fr; }
-  .side-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  /* §9 — top grid stacks full-width below the established tablet
+     breakpoint (the 1fr symbols panel would drop under its compact
+     table floor at ~1281-1347px otherwise).
+     minmax(0, 1fr) — NOT bare 1fr: the unified table carries a 560px
+     min-width, and a bare 1fr track adopts the item's min-content
+     (598px incl. panel padding) → the whole page gained an RTL
+     horizontal overflow at phone widths. With a 0 minimum the table
+     scrolls inside its own .table-scroll wrapper instead (mission §1). */
+  .top-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 1100px) {
@@ -1428,7 +1457,6 @@ body.nav-drawer-open { overflow: hidden; }
 @media (max-width: 640px) {
   :root { --content-pad-x: 12px; }
   .stats-grid { grid-template-columns: 1fr; }
-  .side-panel { grid-template-columns: 1fr; }
   .main-content { padding: 14px var(--content-pad-x, 12px) 40px; }
   .page-title { font-size: 18px; }
   .form-row { grid-template-columns: 1fr; }

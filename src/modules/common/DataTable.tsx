@@ -45,6 +45,22 @@ interface DataTableProps<T> {
   isRowExpanded?: (row: T) => boolean
   /** extra render for an expanded row (full-width details cell) */
   renderExpanded?: (row: T) => React.ReactNode
+  /**
+   * Tighter cell padding for narrow panels (mission §9.2/§10 — compact
+   * tables must fit their panel without horizontal scroll at desktop widths).
+   */
+  compact?: boolean
+  /**
+   * table-layout: fixed — colgroup widths become authoritative so long
+   * message text clips with ellipsis instead of forcing horizontal scroll
+   * (mission §3.2: the unified table keeps ALL 6 columns visible).
+   */
+  fixed?: boolean
+  /**
+   * Per-row class hook (mission §3.2 — subtle accent for the rows that
+   * belong to the cycle currently shown in the summary header).
+   */
+  rowClassName?: (row: T) => string | undefined
   /** accessible label */
   label: string
   emptyState?: React.ReactNode
@@ -59,6 +75,9 @@ export function DataTable<T>({
   onRowClick,
   isRowExpanded,
   renderExpanded,
+  compact,
+  fixed,
+  rowClassName,
   label,
   emptyState,
 }: DataTableProps<T>) {
@@ -71,12 +90,19 @@ export function DataTable<T>({
       style={maxHeight != null ? { maxHeight } : undefined}
       data-count={rows.length}
     >
-      <table className="tb-table" style={minWidth ? { minWidth } : undefined} aria-label={label}>
+      <table
+        className={`tb-table${compact ? ' tb-compact' : ''}`}
+        style={{ ...(minWidth ? { minWidth } : undefined), ...(fixed ? { tableLayout: 'fixed' as const } : undefined) }}
+        aria-label={label}
+      >
         <colgroup>
           {columns.map((c) => (
             <col key={c.key} style={c.width ? { width: c.width } : undefined} />
           ))}
-          {expandedSet ? <col /> : null}
+          {/* the sr-only «جزئیات» header column (expandable tables) must be
+              ZERO wide — an auto col would steal ~16px from the last real
+              column and leave a phantom gap column at the table's end */}
+          {expandedSet ? <col style={{ width: 0 }} /> : null}
         </colgroup>
         <thead>
           <tr>
@@ -117,6 +143,7 @@ export function DataTable<T>({
                   onRowClick={onRowClick}
                   expanded={expanded}
                   renderExpanded={renderExpanded}
+                  rowClassName={rowClassName}
                 />
               )
             })
@@ -136,6 +163,7 @@ function FragmentRow<T>({
   onRowClick,
   expanded,
   renderExpanded,
+  rowClassName,
 }: {
   row: T
   index: number
@@ -144,11 +172,13 @@ function FragmentRow<T>({
   onRowClick?: (row: T, index: number) => void
   expanded: boolean
   renderExpanded?: (row: T) => React.ReactNode
+  rowClassName?: (row: T) => string | undefined
 }) {
+  const extra = rowClassName?.(row)
   return (
     <>
       <tr
-        className={clickable ? 'tb-clickable' : undefined}
+        className={`${clickable ? 'tb-clickable' : ''}${extra ? ` ${extra}` : ''}`.trim() || undefined}
         onClick={clickable ? () => onRowClick?.(row, index) : undefined}
         data-expanded={expanded || undefined}
       >
@@ -164,7 +194,10 @@ function FragmentRow<T>({
       </tr>
       {expanded && renderExpanded ? (
         <tr className="tb-details-row">
-          <td colSpan={columns.length}>{renderExpanded(row)}</td>
+          {/* mission §10 audit: colspan must cover the extra sr-only
+              «جزئیات» header column, otherwise header/body column counts
+              drift apart on expandable tables */}
+          <td colSpan={columns.length + 1}>{renderExpanded(row)}</td>
         </tr>
       ) : null}
     </>

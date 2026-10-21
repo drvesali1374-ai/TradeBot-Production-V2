@@ -166,6 +166,28 @@ export function fmtAgo(input?: DateTimeInput): string {
   return `${Math.floor(diff / 86_400_000)} روز پیش`
 }
 
+/**
+ * Persian-digit execution duration (mission §3.1 summary header):
+ *  - null/undefined/NaN → `'—'`
+ *  - `< 1000` ms → `«۲۳۴ms»`
+ *  - `≥ 1000` ms → `«۲.۳ ثانیه»` (one decimal, rounded half-away; ≥ 60s
+ *    keeps growing in seconds — cycle durations are minutes at most)
+ * Latin `ms` suffix pairs with Persian digits via the natural bidi of
+ * Extended Arabic-Indic numerals (same rule as the Jalali datetime).
+ */
+export function fmtDurationFa(ms: number | null | undefined): string {
+  if (ms == null || Number.isNaN(ms)) return '—'
+  if (ms < 1000) return `${faDigits(Math.round(ms))}ms`
+  const secs = ms / 1000
+  const text = secs >= 100 ? Math.round(secs).toString() : secs.toFixed(1)
+  return `${faDigits(text)} ثانیه`
+}
+
+/** Latin-digit string → Persian-digit string (0-9 → ۰-۹), other chars pass through. */
+function faDigits(s: string | number): string {
+  return String(s).replace(/[0-9]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[Number(d)])
+}
+
 export function fmtQty(n: number | null | undefined): string {
   return fmtNum(n, 0)
 }

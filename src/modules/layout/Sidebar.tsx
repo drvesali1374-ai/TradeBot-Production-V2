@@ -1,12 +1,17 @@
 'use client'
 
 /**
- * App sidebar — RTL fixed nav, view switching, mobile drawer.
+ * App sidebar — RTL fixed nav, view switching, mobile drawer, and the
+ * per-symbol trade-stats table (mission §8-UI).
  * Active views only (mission §7): automation / chart / settings.
  * The drawer sits ABOVE its backdrop (z-index 110 vs 100) and closes
  * via navigation, outside click (backdrop) or Escape (mission §12).
+ * On ≤1024px the sidebar is an off-canvas drawer — the automation view
+ * renders the in-page twin of the stats table there (CSS .stats-inpage),
+ * while this drawer copy stays available (scrollable) at every width.
  */
 import { useEffect, useState } from 'react'
+import { SymbolStatsTable, SymbolStatsCoverageNote, type SymbolStatsPayload } from '@/modules/automation/SymbolStatsTable'
 
 export type ViewId = 'automation' | 'chart' | 'settings'
 
@@ -30,9 +35,11 @@ interface SidebarProps {
   onLogout: () => void
   mobileOpen: boolean
   onCloseMobile: () => void
+  /** Per-symbol closed-trade stats (mission §8-UI) — fetched by the shell. */
+  symbolStats: SymbolStatsPayload | null
 }
 
-export function Sidebar({ active, onNavigate, username, onLogout, mobileOpen, onCloseMobile }: SidebarProps) {
+export function Sidebar({ active, onNavigate, username, onLogout, mobileOpen, onCloseMobile, symbolStats }: SidebarProps) {
   const [profileOpen, setProfileOpen] = useState(false)
 
   useEffect(() => {
@@ -107,6 +114,19 @@ export function Sidebar({ active, onNavigate, username, onLogout, mobileOpen, on
             </div>
           </div>
         </nav>
+
+        {/* §8-UI — per-symbol closed-trade stats. Data arrives from the
+            shell (single fetch shared with the automation view's in-page
+            twin). Server-sorted; empty → «داده‌ای موجود نیست», failure →
+            «خطای دریافت آمار» (never fake zero rows). */}
+        <div className="sidebar-stats">
+          <div className="nav-section-label" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <i className="ph-fill ph-chart-bar" aria-hidden style={{ fontSize: 13 }} />
+            آمار معاملات نمادها
+          </div>
+          <SymbolStatsTable stats={symbolStats} variant="sidebar" label="آمار معاملات نمادها" />
+          <SymbolStatsCoverageNote stats={symbolStats} />
+        </div>
 
         <div className="sidebar-footer">
           <div className="user-card" onClick={() => setProfileOpen((v) => !v)}>
