@@ -1513,3 +1513,215 @@ Work Log:
 - Found remote tracks .env (secret leak) → replacement removes it from HEAD
 - Secret scan on local tracked files: clean (no github_pat, no .env tracked)
 - Force-pushed local main to origin/main (owner explicitly requested replacing old files with new ones)
+
+---
+Task ID: m3-audit-v2
+Agent: v2-auditor
+Task: Mission-3 deep audit of V2 current state (data paths, gaps vs mission)
+
+Work Log (verified in code at 66842e8 = main = mission/v2-fixes; tsc clean; pnl test 15/15 PASS):
+- Toobit: client.ts fully live-only (NO_CREDENTIALS gate, HMAC sorted-QS signing, 12s timeouts). Endpoints: /quote/v1/klines, /quote/v1/ticker/price, /api/v1/futures/{balance,positions,historyPositions,userTrades,leverage,order,position/trading-stop}. normalizePosition maps profitRate fraction→percent ONCE; TP/SL hard-coded null (client.ts:343-346) → positions TP/SL column always «—». getUserTrades dead code (never called). closePosition = POST order SELL_CLOSE/BUY_CLOSE, success = HTTP-ok only (no orderId echo check).
+- Types: OpenPosition all-nullable + takeProfit?/stopLoss?; ClosedPosition realizedPnl/Rate percent; LogRecord {process,source,durationMs,step,cycleId,details} + LogStatus union SUCCESS/INFO/SKIPPED/WARNING/ERROR; StepStatus ok/info/skipped/warning/failed.
+- Engine: runCycle 14 steps in ctx.steps (in-memory), persistCycleOutcome (caller-side) maps ALL steps→LogRecords (sanitized secret-key regex, ONE logs put + lastCycleResult put; LOGS_CAP 500; ids renumbered each cycle). STEP_TO_LOG_STATUS at cycle-engine.ts:427. Cycle summary = single KV key lastCycleResult (overwritten).
+- API (all auth-gated except auth/*, cron(secret), /api hello): positions/open GET, positions/close POST {symbol,direction}→{success,closed,total,errors}; run-cycle POST(+GET!); diagnostics/logs?limit≤200 (UI asks 200); diagnostics/history (closed+stats {total,winning,losing,totalPnl} — NOT consumed by any UI); NO per-symbol stats endpoint. Cron route reads CRON_SECRET but .env.example says X_CRON_SECRET and worker sends RUN_CYCLE_SECRET — naming mismatch.
+- AutomationView: close button fires POST immediately, NO confirm dialog (line ~653); PnL cell = fmtUsd(unrealizedPnL)+fmtPct(profitRate), null→«—», pnlColor sign-aware; TP/SL reads p.takeProfit/p.stopLoss (always null) → empty; log table = separate full-width section, filters search/symbol/status/cycleId-funnel, expandable row + copy cycleId; symbols table in side-panel col (grid minmax(360,380)) but minWidth=430 → guaranteed h-scroll; data fetched ONLY on mount/refreshKey — no polling anywhere in automation view.
+- format.ts: fmtDateTime = fa-IR month/day «،» HH:mm, fmtTime = fa-IR HH:mm:ss — NO explicit timeZone → browser-local (not Tehran), no year, mixed with toISOString UTC in Bale messages; Persian digits only via fa-IR locale; numerals Latin (en-US) elsewhere; no toPersianDigits helper.
+- Fonts: CDN <link> jsdelivr Vazirmatn v33.003 (layout.tsx:31-34); font-family 'Vazirmatn' (globals.css:118,743; chartTheme.ts:64; drawingRender.ts:225); ZERO font files in public/; no next/font — offline/IR-blocked → system fallback.
+- Chart: state-only symbol/interval (no URL params); klines limit=500 fixed, no back-pagination; signals as lightweight-charts markers (createSeriesMarkers) + Entry/TP/SL price lines for pending; initial visible range = last 130 bars (ChartView.tsx:467) — NO focus-timestamp mechanism exists; onGoChart passes symbol only.
+- Tests: bun run tests/pnl-mapping.test.ts (15 checks, all pass, fixtures sanitized); no other tests; scripts: build/next, lint, build:pages, test:pnl.
+- Auth: HMAC-signed cookie tb_session, salted SHA-256, first-login seeds admin when AUTH_ALLOW_SETUP=1 OR AUTH_SECRET unset; update-credentials bumps issuedAt (revokes others); NO middleware.ts — per-route requireAuth only.
+
+Key gaps vs Mission-3 areas: close-confirm missing; PnL column OK (contract solid); TP/SL path dead (always null — needs exchange stop-order fetch or persisted order TP/SL join); cycle/log tables split (details expandable) — merge pending mission spec; time format local-tz/no-year/mixed-UTC; font CDN-only; chart-nav has no timestamp focus; no stats table (history endpoint unused); symbols table overflows 380px column; sidebar has hard-coded «کرون ابری active» row; no polling → stale PnL until manual refresh.
+---
+Task ID: m3-audit-ref
+Agent: ref-auditor
+Task: Mission-3 deep audit of TradeBot-Production reference (close flow, API contracts, TP/SL, PnL, signal logic)
+
+# Audit m3 — V2-implementation contracts (all facts re-verified with file:line; builds on audit-1..4)
+
+## 1. Close-position flow
+- Client automation: automation-manager.js:2899-2912 POST /api/close-position, JSON body
+  {symbol: BARE ("DOT"), direction: "long"|"short" (opposite of signal), clientOrderId: `${symbol}_close_${Date.now()}`,
+   settings:{apiKey,secretKey,baseUrl}}. NO positionId / market / reduceOnly param. Pre-step GET /api/open-positions
+  (2859-2865, headers X-API-Key/X-Secret-Key/X-Base-Url) captures closedPositionInfo {symbol,side,leverage,margin,
+  unrealizedPnL,profitRate(=field×100),avgPrice,available} (2872-2891). Success check: only `response.ok` (2914),
+  then `data.closed||0` (2917); errors swallowed → {closed:0} (2921-2924). No retCode parsing anywhere.
+- Server route close-position/route.ts: keys body.settings→env→HARDCODED (12-14, DO NOT replicate); fullSymbol=`${symbol}-SWAP-USDT` (20);
+  signed GET /api/v1/futures/positions?recvWindow=60000&ts&sig (23-37, X-BB-APIKEY); normalize array|data|result (40);
+  filter posSymbol===fullSymbol.toUpperCase() && side==='LONG'|'SHORT' && parseFloat(pos.available||pos.position)>0 (43-52);
+  none → HTTP200 {success:false,error:'No open positions found',closed:0,total:0} (54-56);
+  per pos: side LONG→'SELL_CLOSE', SHORT→'BUY_CLOSE' (63); qty=Math.ceil(parseFloat(available||position)) (64-72);
+  POST /api/v1/futures/order form-urlencoded sortedQS+sig: {symbol,side,type:'LIMIT',quantity,priceType:'MARKET',
+  newClientOrderId:clientOrderId||`close_${Date.now()}_${i}`,timestamp,recvWindow:'60000'} (68-90);
+  ok→closedCount++, else errors.push(text) (92-97); 300ms sleep if >1 (100-102);
+  resp {success:closed>0, closed, total, errors?} (105-110); 500 on throw (111-114).
+- Engine cycle-engine.ts:1205-1218: identical POST ${baseUrl}/api/close-position; checks only closeResponse.ok → closeData.closed.
+- trading.html manual close: same endpoint, payload {symbol:settings.symbolName, direction, clientOrderId, settings} (trading.html:456-498).
+
+## 2. Toobit contracts (all paths relative to baseUrl default https://api.toobit.com; header X-BB-APIKEY; ts=Date.now() ms)
+- Public: GET /quote/v1/klines?symbol&interval&limit (toobit-proxy/route.ts:16, base hardcoded);
+  GET /quote/v1/ticker/price?symbol= (create-position/route.ts:49) → priceData[0].p | .price|.p (51).
+  Kline row (real sample in lib/tradebot/trading_data.json): [openTime,open,high,low,close,amount,0,value,count,f9,f10] — 11 elems.
+- Signing (helpers.ts:15-50): sorted keys, encodeURIComponent both k+v, join '&'; HMAC-SHA256 hex (Web Crypto);
+  GET: `?${qs}&signature=`; POST: body `${qs}&signature=` + Content-Type x-www-form-urlencoded. recvWindow 60000
+  everywhere EXCEPT /api/v1/futures/positions via open-positions route (5000, open-positions/route.ts:24) and userTrades (5000).
+- GET /api/v1/futures/positions (open-positions/route.ts:22-47) → {positions} passthrough. Consumed fields:
+  symbol, side('LONG'|'SHORT'), posSide, available (qty in CONTRACTS), position (fallback), amount/positionAmt (fallback),
+  margin (USDT), unrealizedPnL (USDT), profitRate (FRACTION; ×100 for % at automation-manager.js:2881,3379; engine:1189),
+  leverage, avgPrice (entry price), markPrice (ONLY in getSymbolMargin fallback, automation-manager.js:3512),
+  time|openTime|updateTime|createdTime (sort key 3347-3348). TP/SL fields: NEVER read — repo never accesses
+  takeProfit/stopLoss/tpslMode/tpPrice/slPrice on a position record (grep-verified 0 hits).
+- NO conditional/plan-order endpoint exists in the repo (no list/cancel of TP/SL orders). TP/SL only SET via
+  POST /api/v1/futures/position/trading-stop (create-position/route.ts:96-126): params {symbol:full, side:'LONG'|'SHORT',
+  timestamp, recvWindow:'60000', takeProfit?+tpTriggerBy:'CONTRACT_PRICE', stopLoss?+slTriggerBy:'CONTRACT_PRICE'};
+  fire-and-forget (response ignored).
+- POST /api/v1/futures/order (open): {symbol:full, side:'BUY_OPEN'|'SELL_OPEN', type:'LIMIT', quantity:intStr,
+  priceType:'MARKET', newClientOrderId, timestamp, recvWindow:'60000'} (create-position/route.ts:60-70). NO price/positionSide/
+  reduceOnly/attachAlgoOrders. Leverage: POST /api/v1/futures/leverage {symbol,leverage,ts,recvWindow} only if leverage>1,
+  response ignored (23-46). Order error → {error:'Failed to create order',details} + upstream status (85-88); ok → {success:true,order} (128).
+- Contract size: `const contractSize = 0.11` HARDCODED for ALL symbols (create-position/route.ts:54);
+  notional = usdtAmount×(leverage||1) (55); quantity = Math.ceil(notional/(price×0.11)) — integer CONTRACTS (56-57).
+  Close qty likewise ceil (close-position:72). avgPrice/available treated as price/qty in UI; margin approx
+  (available×markPrice)/leverage only in getSymbolMargin (3510-3517).
+- userTrades (fill history): internal POST /api/history → GET /api/v1/futures/userTrades — query built MANUALLY UNSORTED
+  `symbol=&limit=&recvWindow=&timestamp=` (history/route.ts:23), sig covers exactly that; params top-level body
+  {symbol:FULL, apiKey, secretKey, baseUrl, limit||'100', recvWindow||'5000'} (16-23); NO pagination (limit only).
+  Fields consumed: time,symbol,price,qty,commission,side('BUY_OPEN'|'SELL_OPEN'|'BUY_CLOSE'|'SELL_CLOSE'),realizedPnl
+  (automation-manager.js:2832-2840; engine:1036-1044).
+- historyPositions (closed positions): GET /api/v1/futures/historyPositions?recvWindow=60000&ts&sig, NO symbol filter → ALL
+  symbols (history-positions/route.ts:40-47). Fields consumed (engine checkClosedPositionsHistory 2037-2094): id, symbol,
+  side('LONG'/'SHORT'), closeTime(ms), closeAvgPrice, realizedPnL, realizedPnlRate (ALREADY % — used directly, NO ×100;
+  engine:2084-2088 vs open-pos profitRate which IS ×100), leverage. Sort closeTime DESC (2031-2035); dedupe vs KV
+  lastPositionCloseTime by newest closeTime (2044-2053); notify first closedPositionsNotifyCount (default 10).
+- Balance: GET /api/v1/futures/balance (balance/route.ts:22-29); 5-shape normalize (48-60); USDT by asset|coin|currency|symbol
+  (63-66); total=balance|total, available=availableBalance|available (then free|availableBalance), positionMargin=positionMargin|
+  position_margin, orderMargin=orderMargin|order_margin|frozen, unrealizedPnL=crossUnRealizedPnl|unrealizedPnl|unrealized (79-83);
+  free=available−orderMargin (84); output .toFixed(4) strings + fetchedAt (86-95).
+- Error convention: HTTP status + {error[,details]}; Toobit body passed as text in details; NEVER retCode/errMsg parsed.
+
+## 3. Signal generation (automation-manager.js analyzeMarketData 690-1107 = trading logic; market-signal-analyzer.js 344-504 = legacy dashboard variant)
+- Candle analyzed: loop `for(i=1;i<N-1;i++)` (850; analyzer:419) → last (forming) candle index N−1 EXCLUDED; most recent
+  closed candle = index N−2. No explicit openTime check; full refetch each cycle (klines limit 1000, interval 1h).
+- RSI (signal-utils.js:13-44, period 14, close): Wilder; seed simple avg at i===period; QUIRK off-by-one — array length N−1,
+  rsi[k]=candle k+1's RSI (lookahead; forming candle RSI leaks into last analyzed candle). avgLoss=0 → rs=100 → RSI≈99.01.
+  Thresholds: Long rsi[i]<rsiLongThreshold(30), Short rsi[i]>rsiShortThreshold(70) (949,981); dashboard single rsiThreshold
+  (default 50): <50 Long, >50 Short (analyzer:429,436). Fallback chain rsiLong ?? marketSettings.rsiThreshold ?? 30.
+- ATR (signal-utils.js:52-74, period 14): TR max(H−L,|H−pC|,|L−pC|); Wilder RMA seeded atr[0]=TR[0]; index-aligned.
+- SMA: only volume — avgVols=SMA(amount,50) (778; analyzer:403). No price SMA in strategy.
+- Daily levels: Tehran midnight, offset=3.5h (734); prevDailyHighs/Lows = prev day-in-data maxHigh/minLow, prevDayCloses (757-774).
+- Fake breakout (default enableBreakLifecycleManagement=true, Wick, breakAtrMult L/S=0.20):
+  breakLong: low[i] ≤ prevLow−atr[i]×0.20; breakShort: high[i] ≥ prevHigh+atr[i]×0.20 (821-827,878-884; Close method→close).
+  SM (839-1013): expiry i−breakCandleIndex > (breakSequenceLifetime>0?that:lookback 50) (887-892); new break if !active||recovered
+  (895-907); OPPOSITE break replaces (910-922); recovery Long close>prevLow / Short close<prevHigh (925-941, same-candle allowed);
+  signal only on recovery candle (944); reset always (1012). Entry conds (946-950/978-982): avgVols≠null && amount>avgVols×volMult(0.2)
+  && rsi cond && HTF (default signalCandleClose: close>prevLow / close<prevHigh, 856-859; previousDayClose variant 853-855;
+  dashboard uses current-day lastClose = lookahead, analyzer:422-423). Legacy branch (SM off): crossover + recentBreak≤lookback (1021-1047).
+- Entry price = signal candle CLOSE. TP/SL (954-995): Long tp=close+close×longFixedTp% else close+atr×20; sl=close−close×longFixedSl%
+  else close−atr×6. Short tp=close−close×shortFixedTp% else close−atr×24; sl=close+close×shortFixedSl% else close+atr×4.
+  DEFAULT QUIRK: shortFixedSl=6 (not null) → Short SL %-based by default (259; init-settings.js:23).
+- Signal obj {type,timestamp=candle OPEN time,price,tp,sl,orderId=`${sym}_YYYYMMDD_HHMMSS` local tz (signal-utils.js:189-198),
+  symbol,candleIndex} (965-975). Exchange order uses a FRESH id from Date.now() (3541).
+- Expiry: (now−signalTime) > signalExpirationHours(6)h → 'منقضی شده' (1189-1197); only latest signal, only if never opened
+  (1153-1160); selectedSignal = latest ONLY if status 'در انتظار' (1434). Engine identical (1056-1101) but returns literal
+  'باز شده' instead of open-time string (engine:1095) — display-only diff.
+- Duplicate detection: NONE — this.signals rebuilt from scratch each cycle (836); natural throttle = tradeWaitTime only.
+- Sizing: margin = totalAssets×entryMarginPercent(5)%/100 toFixed(2) (3409-3412). CLIENT uses legacy settings.leverage (3538) &
+  entryMarginPercent; SERVER engine uses direction-specific effLeverage/effEntryMarginPercent (engine:1125-1131,1471,1732)
+  — CLIENT/SERVER DIVERGENCE (masked in practice: saveSettings mirrors Long values into legacy keys). qty = ceil(margin×lev/(price×0.11)) server-side.
+- Opposite position: closed first (step 8) — ALL symbol positions opposite direction; close failure is NON-FATAL, still opens.
+- 6 risk controls: (1) expiry (above); (2) minSameDirectionCandles>0 (2341-2434): candlesAfterSignal=len−sigIdx−1 (incl forming
+  candle) must be ≥N and candles sigIdx+1..+N all green(Long)/red(Short); (3) safeAsset ALWAYS (2532-2555,3419-3423):
+  free−newMargin ≥ total×50%; (4) priceDistance only if symbol∈freshOpenPositions AND lastEntry≠null (2569-2616): Long
+  (last−cur)/last×100 ≥ 0.5%, Short (cur−last)/last×100 ≥ 0.5%; lastEntry = latest same-direction OPEN row price
+  (getLastEntryPrice 3440-3475); (5) maxMargin same condition (2618-2644): posMargin+newMargin ≤ total×10%; (6) positiveMargin
+  ALWAYS (2653-2672): max(newMargin,0)>0. All rejects → status waiting + lastCycleTime=now + errorCount=0 + Bale math notify.
+- PnL: open positions NOT computed locally — exchange fields unrealizedPnL(USDT) & profitRate(×100→%) (3376-3398).
+  Closed notify uses pre-close unrealizedPnL/profitRate (2880-2881); fill rows show realizedPnl sign-colored (1695-1744);
+  closed-history notify uses realizedPnL + realizedPnlRate (already %, engine:2084-2088). No contract-size math in PnL display.
+
+## 4. Cycle steps (client runCycle automation-manager.js:2223-2761)
+0 selectNextSymbol (615-629: ready if !lastCycleTime||now−last ≥ tradeWaitTime×60000 min; first ready) + persist lastCycleTime=now
+  immediately (2236-2237) → 1 setupForCycle clears all (2244,1202-1221) → 2 fetchMarketData (2248) → 3 updateVisualization→
+  analyzeMarketData (2252) → 4 signals.length===0→NO_SIGNAL_GENERATED (2258) → 5 fetchPositionHistory (2267) → 6 render +
+  updateSelectedSignal (2282-2289) → 7 no selectedSignal→skip (2292) → 8 fetchPrice (2310) → 9 closeOppositePositions (2320) →
+  9.5 minSameDirCandles (2341) → 10 refresh history (2444) → 11 refresh openPositions + lastEntry cache (2460-2499) →
+  12 fetchBalance (2508) → 13 newMargin (2528) → controls safeAsset/priceDistance/maxMargin/positiveMargin (2534-2672) →
+  14 openPosition POST /api/create-position (2679-2685,3531-3548) → refresh balance (2692) → notifyOpenPosition Bale (2703) →
+  saveAutomationData (2721). Loop interval 5min (3576-3578); run-once = cyclesPerRun sequential, 1s delay (4332-4349).
+  Server /api/run-cycle: cyclesPerRun from KV (cap 10, def 1) + 1s delay (run-cycle/route.ts:76-113); cron auth X-Run-Cycle-Secret (44-53).
+  Error path: errorCount++ → ≥allowedErrors(3) → reset+skip+Bale #عبور_نماد else status error+Bale #خطا (2741-2754).
+
+## 5. Trade history / stats
+- Local storage of history = CACHE only: KV keys history_{sym}, signals_{sym}, marketData_{sym}, processedData_{sym},
+  selectedSignal_{sym} via dbSet (saveAutomationData 1829-1946, history at 1898-1915); global openPositions/balance caches
+  (2497,2522,3008,3057). Canonical = exchange; trades/positions/signals KV collections have NO writers (stats dead).
+- History endpoints: POST /api/history (userTrades per-symbol limit 100) for fills; GET /api/history-positions (ALL symbols)
+  only by engine for closed-position notifications (engine:1996).
+- Per-symbol stats: GET /api/db/stats/[symbol] → Analytics.getSymbolStats {symbol,total_trades,winning_trades,total_pnl,avg_pnl}
+  from Trades collection ([symbol]/route.ts:6-19) — always zeros since Trades never written. No stats computed from exchange history.
+
+## Key divergences/gotchas for V2
+1. Client JS vs engine TS: effLeverage/effMargin (engine) vs legacy leverage/entryMarginPercent (client) — engine direction-specific.
+2. Engine signal status literal 'باز شده' vs client open-time string (engine:1095).
+3. profitRate×100 (open pos) vs realizedPnlRate direct (closed pos) — different scales from two Toobit endpoints.
+4. Hardcoded API keys fallback in create/close-position (route.ts:12-14) + settings.html — never replicate.
+5. RSI off-by-one (array N−1, shifted) in BOTH JS and TS port (engine:229-258 copies quirk verbatim).
+6. contractSize 0.11 hardcoded for every symbol; qty Math.ceil (over-rounds fractional closes).
+7. userTrades query manually unsorted (signature must cover exact order symbol,limit,recvWindow,timestamp).
+8. Dashboard analyzer: SPOT-style symbol (symbolName+'USDT') for klines + dailyCloses lookahead + single rsiThreshold 50 — legacy.
+
+---
+Task ID: m3-doc-research
+Agent: docs-researcher
+Task: Toobit official API docs — TP/SL read-back endpoint + pagination + kline intervals
+
+## Official docs location (found)
+- Root: https://api-docs.toobit.com/ (VitePress, en/zh; linked from www.toobit.com/docs). Old leads dead:
+  toobit-docs.github.io=404, github.com/toobit=unrelated personal user, toobitdev/toobit-api=empty repo.
+- v1 USDT-M account/trade: https://api-docs.toobit.com/api/usdt-m-account-and-trading
+- v2 orders/algo: https://api-docs.toobit.com/api/usdt-m-api-v2
+- market data: https://api-docs.toobit.com/api/usdt-m-market-data | enums: https://api-docs.toobit.com/api/basic-information
+
+## TP/SL read-back (core answer)
+- NO documented GET on /api/v1/futures/position/trading-stop — v1 docs list POST only (weight 3; params: symbol!, side! LONG|SHORT,
+  takeProfit?, stopLoss?, tpTriggerBy?, slTriggerBy? MARK_PRICE|CONTRACT_PRICE, tpSize?, slSize?, stopType? FIXED_STOP|TRAILING_STOP,
+  activePrice?, fallbackType? RATE|PRICE, fallbackQuantity?, category?, timestamp!, recvWindow?; response echoes the config).
+- Position TP/SL materializes as conditional rows type=STOP_PROFIT_LOSS. Documented read-back paths:
+  1) GET /api/v1/futures/openOrders with type=STOP_PROFIT_LOSS (+symbol). Weight 1. Params: symbol?, orderId? (cursor, "<orderId"),
+     type? (LIMIT default | STOP | STOP_PROFIT_LOSS), category?, limit? (def20, 1..1000), timestamp!, recvWindow?.
+     STOP_PROFIT_LOSS row fields: stopPrice (trigger), triggerBy, triggerType (0 fixed|1 dyn), activePrice, fallType (0|1=RATE|2=PRICE),
+     fallQuantity, activeStatus, orderType (STOP_LONG_PROFIT|STOP_LONG_LOSS|STOP_SHORT_PROFIT|STOP_SHORT_LOSS), side (SELL_CLOSE for
+     long-TP), status (ORDER_NEW), clientOrderId auto-generated "STOP_LONG_PROFIT_<ts>", executedOrderId, priceType.
+     Default type=LIMIT → earlier live "200 []" is CONSISTENT (TP/SL rows excluded unless type=STOP/STOP_PROFIT_LOSS passed). Re-test needed.
+  2) GET /api/v1/futures/order (single): orderId|origClientOrderId (one required), type only LIMIT|STOP; note: "when type=STOP result may
+     be a STOP or STOP_PROFIT_LOSS order" — same STOP_PROFIT_LOSS schema. Weight 1.
+  3) v2 (cleanest): GET /api/v2/futures/open-algo-orders with stopCategory=STOP_PROFIT_LOSS (+symbol). Weight 1. Params: symbol?,
+     orderId? (cursor), stopCategory? (STOP=plan only | STOP_PROFIT_LOSS=TP/SL only; if OMITTED → plan STOP only, TP/SL EXCLUDED!),
+     limit? (def20, 1..1000), category?, timestamp!, recvWindow?. Row: type STOP_PROFIT_LOSS|STOP_PROFIT_LOSS_MARKET, stopPrice,
+     triggerBy, stopOrderType TAKE_PROFIT|STOP_LOSS, stopType FIXED_STOP|TRAILING_STOP, trailing: activePrice/fallbackType/fallbackQuantity/
+     activeStatus, side BUY|SELL, positionSide LONG|SHORT.
+  - v2 history: GET /api/v2/futures/history-algo-orders (+startTime/endTime) for triggered/canceled TP/SL rows. Single: GET /api/v2/futures/algo-order.
+- Modify TP/SL row: POST /api/v1/futures/order/update (type=STOP_PROFIT_LOSS, row must be ORDER_NEW) or POST /api/v2/futures/algo-order/update.
+  Cancel: DELETE /api/v1/futures/order (type=STOP may resolve to STOP_PROFIT_LOSS row) or DELETE /api/v2/futures/algo-order.
+- GET /api/v1/futures/positions: docs schema has NO TP/SL fields (matches live). v2 has no positions endpoints at all.
+
+## Orders / pagination params (v1)
+- openOrders: see above. Note: "if orderId is sent, all orders < orderId returned".
+- historyOrders (w5): symbol?, orderId?, type? (LIMIT default | STOP), startTime? (def 3 days ago), endTime?, limit? (def20, 1..1000),
+  category?, timestamp!, recvWindow?. NO documented `state` param on v1.
+- userTrades (w5): symbol!, startTime?, endTime?, limit? (def20, 1..1000), fromId?, toId?, category?, recvWindow?, timestamp!.
+- historyPositions (w5): symbol?, marginType? ISOLATED|CROSS, fromId? (cursor, def0), toId?, startTime? (def0), endTime?,
+  limit? (def20, 1..1000), category?, timestamp!, recvWindow?. Cursor = response row `id`. NO pageSize documented (live ignores it).
+  Docs claim limit max 1000 but live caps at 200 (empirical) — use <=200.
+- v2 open-orders/history-orders/user-trades: same shape; limit def20 1..1000, orderId cursor, time = rolling window defaults.
+
+## Klines GET /quote/v1/klines (public, w1)
+- Params: symbol!, interval! (ENUM), startTime?, endTime?, limit? (def1000, max1000; no times -> only latest kline).
+- interval enum (basic-information#kline-candlestick-chart-intervals): 1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 1w 1M.
+  VERIFIED live today: all 14 work; 45m/2d/3M -> {"code":-10009,"msg":"Invalid period!"}. WS kline topic: subset (no 3m/8h).
+
+## Next actions
+1. Signed re-test on live acct: GET /api/v1/futures/openOrders?type=STOP_PROFIT_LOSS&symbol=<SYM>-SWAP-USDT with TP/SL attached; expect
+   STOP_PROFIT_LOSS rows (orderType STOP_LONG_PROFIT / STOP_LONG_LOSS etc.).
+2. Also test GET /api/v2/futures/open-algo-orders?stopCategory=STOP_PROFIT_LOSS — stopCategory is MANDATORY to see TP/SL rows.
+3. Wire TP/SL read-back into toobit client read path; treat stopPrice/triggerBy/orderType as canonical; map v1 orderType <-> v2 stopOrderType.
