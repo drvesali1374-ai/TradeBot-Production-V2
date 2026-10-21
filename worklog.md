@@ -1725,3 +1725,25 @@ Task: Toobit official API docs — TP/SL read-back endpoint + pagination + kline
    STOP_PROFIT_LOSS rows (orderType STOP_LONG_PROFIT / STOP_LONG_LOSS etc.).
 2. Also test GET /api/v2/futures/open-algo-orders?stopCategory=STOP_PROFIT_LOSS — stopCategory is MANDATORY to see TP/SL rows.
 3. Wire TP/SL read-back into toobit client read path; treat stopPrice/triggerBy/orderType as canonical; map v1 orderType <-> v2 stopOrderType.
+
+---
+Task ID: m3-server-core
+Agent: orchestrator (main session)
+Task: Mission-3 server core — §2 TP/SL read-back, §6 fidelity fixes, §8 stats endpoint + comparative tests (commit 1e425a2)
+
+Work Log:
+- Live probes (read-only GET) verified: positions payload has NO TP/SL; TP/SL read-back = GET /api/v1/futures/openOrders?type=STOP_PROFIT_LOSS (rows: orderType STOP_{LONG|SHORT}_{PROFIT|LOSS}, stopPrice, status ORDER_NEW); historyPositions honors `limit` (live cap 200, pageSize ignored); profitRate & realizedPnlRate BOTH fractions (ref displays realizedPnlRate raw = ×100 bug — V2 correct, documented)
+- endpoints.ts: + stopOrders (type=STOP_PROFIT_LOSS), historyPositions limit param
+- client.ts: + getStopOrders, getOpenPositionsFull (tri-state tpslStatus ok/unknown), buildTpslMap (exported, tested); positions/open route serves full positions
+- core/signals/status.ts: window start = candleOpenTime (ref semantics), symbol normalization (short vs full), expiry from candleOpenTime
+- settings.isSignalExpired: age from candleOpenTime (ref automation-manager.js:1189)
+- controls.ts: SAME_DIRECTION_CANDLES = PREFIX semantics (first N post-signal candles incl. forming, doji rejects); PRICE_DISTANCE reads ctx.lastOpenPrice (trade-history OPEN fill, ref getLastEntryPrice), null → control skipped
+- cycle-engine: NEW step fetches userTrades + resolveSignalStatus — latest signal trades ONLY if PENDING (SIGNAL_ALREADY_OPENED gate prevents re-trading an opened signal); opposite-close failure NON-FATAL (ref); positions re-fetched post-close for controls; cycle price = last kline close (ref fetchPrice), order-qty price = ticker (unchanged); postSignalCandles include forming candle
+- market/analysis route: statuses resolved against real fills when credentials exist (fallback age-only)
+- NEW server/analytics/symbol-stats.ts + /api/diagnostics/symbol-stats (limit 200, truncated flag; dedup by id; winRate; after-fee netIncome; count DESC, netIncome DESC, symbol ASC)
+- Tests: tests/tpsl-mapping.test.ts (11✓), tests/symbol-stats.test.ts (24✓), tests/fidelity.test.ts (34✓ — independent reference twins: RSI shift identity, ATR exact, TP/SL incl. shortFixedSl=6, Long/Short/none 50-candle fixtures, OPENED gate, prefix candles, PnL scales, qty contract); package.json `test` runs all 4 suites; tsc+eslint clean
+- ESLint gotcha documented: bare `{}` block right after un-terminated arrow statement (`})`) breaks the TS parser (ASI) — terminating semicolon added
+
+Stage Summary:
+- Server core for mission §1-§8 done; frontend remains (§1 dialog, §3 unified table, §4 fmtDateTime, §5 font, §7 chart-nav, §8-UI stats, §9 layout, §10 tables audit)
+- TP/SL live values on test account: XRP-SHORT TP 1.1987 / SL 1.465; DOT-SHORT TP 1.0286 / SL 1.2572 (fixtures sanitized)
