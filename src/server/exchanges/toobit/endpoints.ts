@@ -6,11 +6,33 @@
 export const TOOBIT_BASE_URL = 'https://api.toobit.com'
 
 export const endpoints = {
-  /** Public — klines (candles). Symbol accepts {S}-SWAP-USDT or {S}USDT. */
-  klines: (params: { symbol: string; interval: string; limit: number }) => ({
+  /**
+   * Public — klines (candles). Symbol accepts {S}-SWAP-USDT or {S}USDT.
+   * Optional startTime/endTime are the DOCUMENTED public params (epoch ms).
+   * NOTE — live Toobit semantics (verified 2026-10, sandbox clock): the
+   * response holds the most recent `limit` candles INSIDE [startTime,endTime]
+   * (endTime alone works; startTime alone is IGNORED → latest candles). To
+   * center a historical bar mid-window, pass an endTime ≈ bar + limit/2
+   * intervals, not just a startTime.
+   * Undefined times are stripped here so buildSortedQuery never serializes
+   * them as the literal string "undefined".
+   */
+  klines: (params: {
+    symbol: string
+    interval: string
+    limit: number
+    startTime?: number
+    endTime?: number
+  }) => ({
     method: 'GET' as const,
     path: '/quote/v1/klines',
-    query: params,
+    query: {
+      symbol: params.symbol,
+      interval: params.interval,
+      limit: params.limit,
+      ...(params.startTime != null ? { startTime: params.startTime } : {}),
+      ...(params.endTime != null ? { endTime: params.endTime } : {}),
+    },
     signed: false,
   }),
   /** Public — latest ticker price. */

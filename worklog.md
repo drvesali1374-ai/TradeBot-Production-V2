@@ -1823,3 +1823,19 @@ Work Log:
 Stage Summary:
 - §3/§8-UI/§9/§10 complete and committed: ONE unified cycle+log panel (summary + single table, old split gone), symbol-stats table in sidebar (desktop) / in-page panel (≤1024) / drawer copy (mobile) with coverage + error/empty states, 1/3|2/3 desktop top grid that stacks ≤1280 with no page-level overflow at any width, tables audited & compact-fitted.
 - Follow-up notes: test account still has 2 open positions (from the m3-fe-2a incident); symbols «آخرین چرخه» cells show «—» until the persisted symbols state records a lastCycleTime (server-side field untouched per this task's scope).
+
+---
+Task ID: m3-fe-2c
+Agent: fe-2c-chartnav (agent timed out; orchestrator completed verification)
+Task: Mission §7 — signal → professional chart navigation
+
+Work Log:
+- Contract: page-level chartFocus state {symbol, interval, signalTime(ms), side, price, tp, sl} + URL params ?chart=&interval=&focus=<ms>&side= (history.replaceState; parsed on mount → refresh-restorable; manual symbol/interval change drops focus)
+- klines route + client.getKlines: optional startTime/endTime (ms) passthrough (Toobit-documented params) — the ONLY server change; read-only
+- Signals table rows fully clickable (cursor-pointer + stopPropagation on inner buttons); action column = icon-only chart button w/ title+aria «نمایش در چارت حرفه‌ای»
+- ChartView: focus bar located via binary search (ms-documented); older-than-window signals load history (startTime = focus − 250×interval, limit 500) then center on the bar (idx−80…idx+40); synthetic marker from focus payload if absent from analysis markers; Entry/TP/SL price lines for focused signal; «بازگشت به اکنون» button clears focus + returns to latest bars; unfound bar → clear message, no wrong jump
+- New tests/chart-focus-url.test.ts (21✓ — URL build/parse round-trip, ms units, invalid params, refresh restore) — chained in package.json test
+- Orchestrator E2E verification: clicked signal row (Short 1405/07/13) → chart opened, URL ?chart=BTC&interval=1h&focus=1791147600000&side=Short; visibleRange 1790859600..1791291600 CONTAINS focus bar 1791147600 (signal was ~240 bars old → history fetch path exercised); markersCount=1 exactly at 1791147600; focusInfo {side:Short, price:85828.6}; «بازگشت به اکنون — جدیدترین کندلها» button present; screenshot saved
+
+Stage Summary:
+- All mission sections implemented: §1-§10 done; §7 verified E2E. tsc 0, lint 0, 7 test suites 150 checks green

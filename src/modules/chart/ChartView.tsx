@@ -31,6 +31,7 @@ import type {
 } from 'lightweight-charts'
 import { apiGet } from '@/modules/common/api'
 import { fmtNum, fmtPrice } from '@/modules/common/format'
+import { useToast } from '@/modules/common/toast'
 import { ChartToolbar } from './ChartToolbar'
 import {
   ENTRY_COLOR,
@@ -44,10 +45,12 @@ import {
 import { renderDrawing, hitTestDrawing, type AnchorWhich, type DrawingHit, type OverlayRenderInput } from './drawingRender'
 import {
   DRAW_COLORS,
+  INTERVALS,
   INTERVAL_MS,
   SYMBOLS,
   type AnalysisResponse,
   type Candle,
+  type ChartFocusPayload,
   type Drawing,
   type DrawingDraft,
   type DrawingToolId,
@@ -63,7 +66,14 @@ import {
 
 export interface ChartViewProps {
   initialSymbol: string
+  /** §7 — initial toolbar interval (page restores it from the URL) */
+  initialInterval?: string
+  /** §7 — signal-candle focus: center + mark the bar containing signalTime */
+  focus?: ChartFocusPayload | null
   onSymbolChange?: (symbol: string) => void
+  onIntervalChange?: (interval: string) => void
+  /** fired when the focus should be dropped (back-to-now button) */
+  onFocusDrop?: () => void
 }
 
 interface SignalState {
@@ -106,6 +116,40 @@ function snapBarTimeSec(candles: Candle[], targetMs: number, intervalMs: number)
   return Math.floor(candles[ans].openTime / 1000)
 }
 
+/**
+ * Focus lookup (mission §7.2) — ms-CONSISTENT companion of snapBarTimeSec.
+ * ALL inputs/outputs are epoch MILLISECONDS (Toobit kline row[0] is ms;
+ * Signal.candleOpenTime is ms; lightweight-charts Time is SECONDS and is
+ * derived only at chart-API boundaries).
+ *
+ * Returns the index of the bar CONTAINING targetMs (openTime ≤ targetMs <
+ * openTime+intervalMs), or -1 when targetMs lies before the window / in a
+ * data gap / beyond the last bar. An EXACT candleOpenTime always matches
+ * when the bar exists in `candles`.
+ */
+function barIndexForMs(candles: Candle[], targetMs: number, intervalMs: number): number {
+  const n = candles.length
+  if (n === 0) return -1
+  if (targetMs < candles[0].openTime) return -1
+  if (targetMs > candles[n - 1].openTime + intervalMs) return -1
+  let lo = 0
+  let hi = n - 1
+  let ans = 0
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (candles[mid].openTime <= targetMs) {
+      ans = mid
+      lo = mid + 1
+    } else {
+      hi = mid - 1
+    }
+  }
+  const bar = candles[ans]
+  // exact/mid-gap containment: only a bar whose [open, open+interval) span
+  // covers the target is the signal's candle — never a wrong neighbor.
+  return targetMs < bar.openTime + intervalMs ? ans : -1
+}
+
 /** Active drawing-drag session. */
 interface DragState {
   id: number
@@ -125,10 +169,21 @@ const CUSTOM_SYMBOL_RE = /^[A-Z0-9]{2,16}$/
 /* Component                                                           */
 /* ------------------------------------------------------------------ */
 
-export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
+/** Consumed focus — resolved after the data load (for badge/legend + E2E). */
+interface FocusInfo {
+  /** bar open-time in SECONDS (lightweight-charts Time unit) */
+  barTimeSec: number
+  signal: ChartFocusPayload
+}
+
+export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChange, onIntervalChange, onFocusDrop }: ChartViewProps) {
+  const { show } = useToast()
+
   /* ——— state ——— */
   const [symbol, setSymbol] = useState(initialSymbol || 'BTC')
-  const [interval, setInterval] = useState('1h')
+  const [interval, setInterval] = useState(
+    initialInterval && (INTERVALS as readonly string[]).includes(initialInterval) ? initialInterval : '1h',
+  )
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
@@ -142,6 +197,9 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
   const [signalState, setSignalState] = useState<SignalState | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [customSymbols, setCustomSymbols] = useState<string[]>([])
+  // §7 — the consumed focus (chart centered + marker drawn). Null while no
+  // focus is active or when the focus bar could not be found in the data.
+  const [focusInfo, setFocusInfo] = useState<FocusInfo | null>(null)
 
   /* ——— refs (imperative chart world) ——— */
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -162,17 +220,38 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
   const drawingsRevRef = useRef(0)
   const loadIdRef = useRef(0)
   const symbolRef = useRef(symbol)
+  const intervalRef = useRef(interval)
   const nextIdRef = useRef(1)
   const onSymbolChangeRef = useRef(onSymbolChange)
+  const onIntervalChangeRef = useRef(onIntervalChange)
+  const onFocusDropRef = useRef(onFocusDrop)
   const prevTickRef = useRef<number | null>(null)
   const selectedIdRef = useRef<number | null>(null)
   const lastColorRef = useRef<string | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const dragRef = useRef<DragState | null>(null)
+  // §7 focus world: prop mirror + resolved visual state + marker snapshot
+  const focusRef = useRef<ChartFocusPayload | null>(focus ?? null)
+  const focusActiveRef = useRef(false)
+  const focusBarSecRef = useRef<number | null>(null)
+  const focusInfoRef = useRef<FocusInfo | null>(null)
+  const lastMarkersRef = useRef<SeriesMarker<Time>[]>([])
+
+  useEffect(() => {
+    focusInfoRef.current = focusInfo
+  }, [focusInfo])
 
   useEffect(() => {
     onSymbolChangeRef.current = onSymbolChange
   }, [onSymbolChange])
+
+  useEffect(() => {
+    onIntervalChangeRef.current = onIntervalChange
+  }, [onIntervalChange])
+
+  useEffect(() => {
+    onFocusDropRef.current = onFocusDrop
+  }, [onFocusDrop])
 
   /* ---------------------------------------------------------------- */
   /* Overlay rendering (logical → pixel on every chart redraw)        */
@@ -401,11 +480,32 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
           size: isPending ? 2 : 1,
         })
       }
-      list.sort((a, b) => (a.time as number) - (b.time as number))
     }
+    // §7.2 — the focused signal MUST show a marker at its bar even when the
+    // analysis window/payload does not include it (e.g. historical focus):
+    // synthesize one from the focus payload, deduped by bar time.
+    if (focusActiveRef.current && focusBarSecRef.current != null && signalsVisibleRef.current) {
+      const t = focusBarSecRef.current as UTCTimestamp
+      if (!list.some((m) => (m.time as number) === (t as number))) {
+        const isLong = focusRef.current?.side !== 'Short'
+        list.push({
+          time: t,
+          position: isLong ? 'belowBar' : 'aboveBar',
+          color: isLong ? UP_COLOR : DOWN_COLOR,
+          shape: isLong ? 'arrowUp' : 'arrowDown',
+          text: isLong ? 'L · سیگنال' : 'S · سیگنال',
+          size: 2,
+        })
+      }
+    }
+    list.sort((a, b) => (a.time as number) - (b.time as number))
+    lastMarkersRef.current = list
     api.setMarkers(list)
   }, [])
 
+  /** Entry/TP/SL price lines — generalized (§7.2): the FOCUSED signal gets
+   *  them while a focus is active; without a focus the pending signal keeps
+   *  its previous behavior. Cleared whenever the focus drops. */
   const refreshPriceLines = useCallback(() => {
     const series = candleRef.current
     if (!series) return
@@ -417,8 +517,19 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
       }
     }
     priceLinesRef.current = []
-    const pending = analysisRef.current?.pendingSignal
-    if (!pending || !signalsVisibleRef.current) return
+    let target: { price: number; tp: number; sl: number } | null = null
+    if (signalsVisibleRef.current) {
+      if (focusActiveRef.current && focusRef.current) {
+        const f = focusRef.current
+        if (Number.isFinite(f.price) && Number.isFinite(f.tp) && Number.isFinite(f.sl)) {
+          target = { price: f.price as number, tp: f.tp as number, sl: f.sl as number }
+        }
+      } else {
+        const pending = analysisRef.current?.pendingSignal
+        if (pending) target = { price: pending.price, tp: pending.tp, sl: pending.sl }
+      }
+    }
+    if (!target) return
     const mk = (price: number, color: string, style: LineStyle, title: string): IPriceLine =>
       series.createPriceLine({
         price,
@@ -429,9 +540,9 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
         axisLabelVisible: true,
       })
     priceLinesRef.current = [
-      mk(pending.price, ENTRY_COLOR, LineStyle.Solid, 'Entry'),
-      mk(pending.tp, UP_COLOR, LineStyle.Dashed, 'TP'),
-      mk(pending.sl, DOWN_COLOR, LineStyle.Dashed, 'SL'),
+      mk(target.price, ENTRY_COLOR, LineStyle.Solid, 'Entry'),
+      mk(target.tp, UP_COLOR, LineStyle.Dashed, 'TP'),
+      mk(target.sl, DOWN_COLOR, LineStyle.Dashed, 'SL'),
     ]
   }, [])
 
@@ -440,7 +551,7 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
   /* ---------------------------------------------------------------- */
 
   const applyKlines = useCallback(
-    (candles: Candle[]) => {
+    (candles: Candle[], focusIdx = -1) => {
       candlesRef.current = candles
       candlesByTimeRef.current = new Map(candles.map((c) => [Math.floor(c.openTime / 1000), c]))
       const series = candleRef.current
@@ -462,9 +573,28 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
             color: c.close >= c.open ? UP_VOLUME : DOWN_VOLUME,
           })),
         )
-        // focus the last ~130 candles
         const n = candles.length
-        chartRef.current?.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 130), to: n + 6 })
+        const ts = chartRef.current?.timeScale()
+        const focusSignal = focusRef.current
+        if (focusIdx >= 0 && focusSignal && candles[focusIdx]) {
+          // §7.2 — center ON the signal's candle (replaces the default
+          // last-130 centering) and activate the focus visuals.
+          const barSec = Math.floor(candles[focusIdx].openTime / 1000)
+          focusBarSecRef.current = barSec
+          focusActiveRef.current = true
+          setFocusInfo({ barTimeSec: barSec, signal: focusSignal })
+          ts?.setVisibleLogicalRange({
+            from: Math.max(0, focusIdx - 80),
+            to: focusIdx + 40,
+          })
+        } else {
+          // no focus (or focus NOT resolved — §7.2 forbids wrong movement):
+          // focus the last ~130 candles as before.
+          focusBarSecRef.current = null
+          focusActiveRef.current = false
+          setFocusInfo(null)
+          ts?.setVisibleLogicalRange({ from: Math.max(0, n - 130), to: n + 6 })
+        }
       }
       setHoverCandle(candles.length ? candles[candles.length - 1] : null)
       setLastClose(candles.length ? candles[candles.length - 1].close : null)
@@ -498,6 +628,24 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
   )
 
   /* ---------------------------------------------------------------- */
+  /* §7 focus — prop mirror. Declared BEFORE the data-load effect so the */
+  /* refs are already up to date in the same commit (effect order).     */
+  /* ---------------------------------------------------------------- */
+
+  useEffect(() => {
+    focusRef.current = focus ?? null
+    if (!focusRef.current) {
+      // focus dropped (manual symbol/interval change or back-to-now):
+      // immediately remove the focus visuals — marker/price lines/badge.
+      focusActiveRef.current = false
+      focusBarSecRef.current = null
+      setFocusInfo(null)
+      refreshMarkers()
+      refreshPriceLines()
+    }
+  }, [focus, refreshMarkers, refreshPriceLines])
+
+  /* ---------------------------------------------------------------- */
   /* Data loading (klines → analysis → markers/price-lines → redraw)  */
   /* ---------------------------------------------------------------- */
 
@@ -512,9 +660,41 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
           `/api/market/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=500`,
         )
         if (cancelled || myId !== loadIdRef.current) return
-        const candles = (kl.candles ?? []).slice().sort((a, b) => a.openTime - b.openTime)
+        let candles = (kl.candles ?? []).slice().sort((a, b) => a.openTime - b.openTime)
         if (candles.length === 0) throw new Error('کندلی برای این نماد یافت نشد')
-        applyKlines(candles)
+        const intervalMs = INTERVAL_MS[interval] ?? 3_600_000
+        const focusSignal = focusRef.current
+        let focusIdx = focusSignal ? barIndexForMs(candles, focusSignal.signalTime, intervalMs) : -1
+        // §7.2 step 4 — the signal candle predates the latest window: fetch a
+        // history window COVERING it (end-anchored: Toobit returns the newest
+        // `limit` candles inside [start,end], so anchor endTime ≈ focus + 250
+        // intervals to land the focus bar mid-window) and center there.
+        if (focusSignal && focusIdx === -1) {
+          try {
+            const half = Math.floor(500 / 2)
+            const startTime = focusSignal.signalTime - half * intervalMs
+            const endTime = focusSignal.signalTime + half * intervalMs
+            const k2 = await apiGet<KlinesResponse>(
+              `/api/market/klines?symbol=${encodeURIComponent(symbol)}` +
+                `&interval=${interval}&limit=500&startTime=${startTime}&endTime=${endTime}`,
+            )
+            if (cancelled || myId !== loadIdRef.current) return
+            const hist = (k2.candles ?? []).slice().sort((a, b) => a.openTime - b.openTime)
+            const hIdx = hist.length ? barIndexForMs(hist, focusSignal.signalTime, intervalMs) : -1
+            if (hIdx !== -1) {
+              candles = hist
+              focusIdx = hIdx
+            }
+          } catch {
+            /* historical fetch failed — fall through to the not-found path */
+          }
+        }
+        if (cancelled || myId !== loadIdRef.current) return
+        if (focusSignal && focusIdx === -1) {
+          // §7.2 step 5 — CLEAR message; do NOT move the chart anywhere else.
+          show('سیگنال در چارت', 'سیگنال در داده تاریخی موجود یافت نشد', 'warning')
+        }
+        applyKlines(candles, focusIdx)
         // analysis is secondary — its failure must not blank the candles
         try {
           const an = await apiGet<AnalysisResponse>(`/api/market/analysis?symbol=${encodeURIComponent(symbol)}`)
@@ -535,7 +715,7 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
     return () => {
       cancelled = true
     }
-  }, [symbol, interval, reloadKey, applyKlines, applyAnalysis])
+  }, [symbol, interval, reloadKey, applyKlines, applyAnalysis, show])
 
   /* ---------------------------------------------------------------- */
   /* Live ticker (10s polling)                                         */
@@ -575,6 +755,7 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
   }, [symbol])
 
   useEffect(() => {
+    intervalRef.current = interval
     intervalMsRef.current = INTERVAL_MS[interval] ?? 3_600_000
   }, [interval])
 
@@ -598,6 +779,16 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
       setSymbol(s)
     }
   }, [initialSymbol])
+
+  // external interval changes (§7 — page restores the interval from the
+  // URL / goToSignal before the chart view mounts)
+  useEffect(() => {
+    const i = initialInterval?.trim()
+    if (i && (INTERVALS as readonly string[]).includes(i) && i !== intervalRef.current) {
+      intervalRef.current = i
+      setInterval(i)
+    }
+  }, [initialInterval])
 
   /* ---------------------------------------------------------------- */
   /* Drawing interactions                                              */
@@ -866,7 +1057,9 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
     redrawOverlay()
   }, [selectedId, redrawOverlay])
 
-  // dev-only debug/E2E hook — exposes chart coordinate accessors (no secrets)
+  // dev-only debug/E2E hook — exposes chart coordinate accessors (no secrets).
+  // §7 E2E additions: visibleRange (SECONDS, from/to), visibleLogicalRange,
+  // the applied markers list and the consumed focus info.
   useEffect(() => {
     if (process.env.NODE_ENV !== 'development') return
     const w = window as unknown as { __tbChart?: Record<string, unknown> }
@@ -882,6 +1075,21 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
       candleAt: (tSec: number) => candlesByTimeRef.current.get(tSec) ?? null,
       candles: () => candlesRef.current,
       drawings: () => drawingsRef.current,
+      visibleRange: () => {
+        const r = chartRef.current?.timeScale().getVisibleRange()
+        return r ? { from: r.from as number, to: r.to as number } : null
+      },
+      visibleLogicalRange: () => chartRef.current?.timeScale().getVisibleLogicalRange() ?? null,
+      markers: () => lastMarkersRef.current,
+      focusInfo: () =>
+        focusInfoRef.current
+          ? {
+              barTimeSec: focusInfoRef.current.barTimeSec,
+              signalTimeMs: focusInfoRef.current.signal.signalTime,
+              side: focusInfoRef.current.signal.side ?? null,
+              price: focusInfoRef.current.signal.price ?? null,
+            }
+          : null,
     }
     return () => {
       delete w.__tbChart
@@ -926,14 +1134,33 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
   /* ---------------------------------------------------------------- */
 
   const handleSymbolChange = useCallback((s: string) => {
+    const changed = s !== symbolRef.current
     symbolRef.current = s
     setSymbol(s)
-    onSymbolChangeRef.current?.(s)
+    // §7 — notify the page ONLY on a real manual change (not re-clicks of
+    // the active chip) so it can drop the focus + strip the URL params.
+    if (changed) onSymbolChangeRef.current?.(s)
   }, [])
 
   const handleIntervalChange = useCallback((i: string) => {
+    const changed = i !== intervalRef.current
+    intervalRef.current = i
     setInterval(i)
+    if (changed) onIntervalChangeRef.current?.(i) // §7 — drops the page focus
   }, [])
+
+  /** §7.2 — «بازگشت به اکنون»: clear all focus visuals, drop the page-level
+   *  focus (state + URL) and reload the LATEST candles with the default
+   *  last-130 centering (the focus may have panned the chart into history). */
+  const handleBackToNow = useCallback(() => {
+    focusActiveRef.current = false
+    focusBarSecRef.current = null
+    setFocusInfo(null)
+    refreshMarkers()
+    refreshPriceLines()
+    onFocusDropRef.current?.()
+    setReloadKey((k) => k + 1)
+  }, [refreshMarkers, refreshPriceLines])
 
   const handleToolChange = useCallback((t: DrawingToolId) => {
     draftRef.current = null
@@ -1015,6 +1242,10 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
           : 'var(--text-primary)'
 
   const selectedDrawing = selectedId != null ? drawings.find((d) => d.id === selectedId) ?? null : null
+
+  // §7 — focus legend copy (why is the chart here?)
+  const focusLong = focusInfo?.signal.side !== 'Short'
+  const focusHue = focusLong ? 'var(--success)' : 'var(--danger)'
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0 }}>
@@ -1203,6 +1434,62 @@ export function ChartView({ initialSymbol, onSymbolChange }: ChartViewProps) {
                   )
                 })}
             </div>
+          </div>
+        ) : null}
+
+        {/* §7 — focus badge: why the chart is centered here + quick way back */}
+        {focusInfo ? (
+          <div
+            data-chart-ui
+            style={{
+              position: 'absolute',
+              bottom: 46,
+              right: 12,
+              zIndex: 4,
+              direction: 'rtl',
+              display: 'flex',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: 7,
+              rowGap: 4,
+              padding: '6px 10px',
+              borderRadius: 10,
+              background: 'color-mix(in srgb, var(--bg-input) 92%, transparent)',
+              border: '1px solid var(--border-soft)',
+              backdropFilter: 'blur(6px)',
+              fontSize: 11,
+              color: 'var(--text-secondary)',
+              maxWidth: 'calc(100% - 24px)',
+            }}
+          >
+            <i className={`ph-fill ${focusLong ? 'ph-trend-up' : 'ph-trend-down'}`} style={{ color: focusHue, fontSize: 14 }} aria-hidden />
+            <span className={`badge ${focusLong ? 'badge-success' : 'badge-danger'}`} style={{ fontSize: 10, padding: '2px 8px' }}>
+              سیگنال {focusLong ? 'لانگ' : 'شورت'}
+            </span>
+            {focusInfo.signal.price != null ? (
+              <span className="num" style={{ color: 'var(--text-primary)', fontWeight: 700, fontSize: 10.5 }}>
+                {fmtPrice(focusInfo.signal.price)}
+              </span>
+            ) : null}
+            {focusInfo.signal.tp != null && focusInfo.signal.sl != null ? (
+              <span className="num" style={{ fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                TP {fmtNum(focusInfo.signal.tp, 1)} / SL {fmtNum(focusInfo.signal.sl, 1)}
+              </span>
+            ) : null}
+            <span className="num" style={{ fontSize: 9.5, color: 'var(--text-muted)' }}>
+              {interval}
+            </span>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              style={{ padding: '3px 8px', fontSize: 10.5, whiteSpace: 'nowrap' }}
+              onClick={handleBackToNow}
+              data-tooltip="برگشت به جدیدترین کندل‌ها و پاک‌کردن فوکوس"
+              aria-label="بازگشت به اکنون — جدیدترین کندل‌ها"
+            >
+              <i className="ph ph-arrow-elbow-left" aria-hidden />
+              بازگشت به اکنون
+            </button>
           </div>
         ) : null}
 

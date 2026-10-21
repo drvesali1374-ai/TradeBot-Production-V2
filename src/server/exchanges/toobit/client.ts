@@ -81,8 +81,27 @@ export class ToobitClient {
   /* Public market data (no credentials required)                       */
   /* ---------------------------------------------------------------- */
 
-  async getKlines(symbol: string, interval: string, limit: number): Promise<Candle[]> {
-    const ep = endpoints.klines({ symbol: fullSymbol(symbol), interval, limit })
+  /**
+   * Public klines. Optional opts.startTime/endTime (epoch MILLISECONDS —
+   * Toobit kline row[0] is ms) pass through to the documented public params;
+   * the 3-arg signature is unchanged (backward compatible). Live semantics:
+   * the exchange returns the most recent `limit` candles inside the window,
+   * so anchor a historical view with `endTime`, not `startTime` (see
+   * endpoints.klines note).
+   */
+  async getKlines(
+    symbol: string,
+    interval: string,
+    limit: number,
+    opts?: { startTime?: number; endTime?: number },
+  ): Promise<Candle[]> {
+    const ep = endpoints.klines({
+      symbol: fullSymbol(symbol),
+      interval,
+      limit,
+      ...(opts?.startTime != null ? { startTime: opts.startTime } : {}),
+      ...(opts?.endTime != null ? { endTime: opts.endTime } : {}),
+    })
     const url = `${TOOBIT_BASE_URL}${ep.path}?${buildSortedQuery(ep.query as Record<string, string | number>)}`
     const res = await fetchWithTimeout(url, { method: 'GET' })
     if (!res.ok) throw exError('HTTP_ERROR', `klines HTTP ${res.status}`, res.status)

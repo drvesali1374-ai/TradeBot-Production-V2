@@ -8,6 +8,15 @@
  * Execution model (instruction §10.1): NO browser scheduler — automation
  * runs via cloud cron; the ONLY manual trigger is «یک چرخه» (automation
  * view only, mission §7.5).
+ *
+ * Signal → chart navigation contract (mission §7.1/§7.3):
+ *  - `chartFocus` carries the REAL candle time of a signal (candleOpenTime
+ *    in EPOCH MILLISECONDS — never Date.now()/live price).
+ *  - goToSignal sets symbol+interval+focus, switches to the chart view and
+ *    writes the minimal URL `?chart=<SYM>&interval=<IV>&focus=<ms>[&side=…]`
+ *    so a REFRESH restores the same focus (parse on mount).
+ *  - a MANUAL symbol/interval change in the chart toolbar drops the focus
+ *    (state cleared + URL params stripped).
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AppHeader } from '@/modules/layout/AppHeader'
@@ -20,11 +29,29 @@ import { SettingsView } from '@/modules/settings/SettingsView'
 import { apiGet, apiPost } from '@/modules/common/api'
 import { useToast } from '@/modules/common/toast'
 import type { SymbolStatsPayload } from '@/modules/automation/SymbolStatsTable'
+import { INTERVALS, type ChartFocusPayload } from '@/modules/chart/types'
+import { buildChartFocusSearch, parseChartFocusSearch, stripChartFocusKeys } from '@/modules/chart/focusUrl'
+import type { Signal } from '@/core/types'
 
 const VIEW_META: Record<ViewId, { title: string; subtitle: string }> = {
   automation: { title: 'اتوماسیون', subtitle: 'پنل کنترل و مشاهده چرخه‌های معاملاتی' },
   chart: { title: 'چارت حرفه‌ای', subtitle: 'نمودار تعاملی، سیگنال‌ها و ابزار رسم' },
   settings: { title: 'تنظیمات', subtitle: 'استراتژی، اتصال صرافی و اعلان‌ها' },
+}
+
+/**
+ * Page-level chart focus (mission §7.1).
+ * UNITS: signalTime = the signal's candleOpenTime in EPOCH MILLISECONDS.
+ */
+interface ChartFocusState {
+  symbol: string
+  interval: string
+  signalTime: number
+  side?: 'Long' | 'Short'
+  price?: number
+  tp?: number
+  sl?: number
+  signalId?: string
 }
 
 function Shell() {
@@ -35,6 +62,9 @@ function Shell() {
   const [running, setRunning] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
   const [chartSymbol, setChartSymbol] = useState('BTC')
+  const [chartInterval, setChartInterval] = useState('1h')
+  // §7 — signal-candle focus for the professional chart (null = none)
+  const [chartFocus, setChartFocus] = useState<ChartFocusState | null>(null)
   // §8-UI — per-symbol closed-trade stats: fetched once per mount and
   // re-fetched on EVERY refreshKey bump (covers «after each cycle run» —
   // runCycle bumps the key via bumpRefresh). Shared by Sidebar + AutomationView.
@@ -58,6 +88,18 @@ function Shell() {
     return () => {
       alive = false
     }
+  }, [])
+
+  // §7.3 — refresh-restore: parse ?chart&interval&focus[&side] back into the
+  // chart state so the professional chart re-opens AT the signal candle.
+  // (Runs before login resolves too — the focus simply waits in state.)
+  useEffect(() => {
+    const f = parseChartFocusSearch(window.location.search)
+    if (!f) return
+    setChartSymbol(f.symbol)
+    setChartInterval(f.interval)
+    setChartFocus({ ...f })
+    setView('chart')
   }, [])
 
   const bumpRefresh = useCallback(() => setRefreshKey((k) => k + 1), [])
@@ -96,6 +138,80 @@ function Shell() {
     setAuthState('login')
     toastShown.current = false
   }, [])
+
+  /* ——— §7.1 chart-focus navigation ——— */
+
+  /** Drop the focus: clear state AND strip the focus params from the URL. */
+  const clearChartFocus = useCallback(() => {
+    setChartFocus(null)
+    try {
+      const rest = stripChartFocusKeys(window.location.search)
+      window.history.replaceState(null, '', rest ? `${window.location.pathname}${rest}` : window.location.pathname)
+    } catch {
+      /* history unavailable — state is still cleared */
+    }
+  }, [])
+
+  /**
+   * Navigate to the professional chart AT a signal's real candle.
+   * signalTime = candleOpenTime in epoch MILLISECONDS (mission §7 — never
+   * Date.now(), never the live price). Writes the minimal restorable URL.
+   */
+  const goToSignal = useCallback(
+    (signal: Signal, interval: string) => {
+      const symbol = String(signal.symbol).replace(/(-SWAP)?-?USDT$/i, '').toUpperCase()
+      const iv = (INTERVALS as readonly string[]).includes(interval) ? interval : '1h'
+      const signalTime = Number(signal.candleOpenTime)
+      if (!Number.isFinite(signalTime) || signalTime <= 0) return // no candle time → no focus
+      setChartSymbol(symbol)
+      setChartInterval(iv)
+      setChartFocus({
+        symbol,
+        interval: iv,
+        signalTime,
+        ...(signal.side === 'Long' || signal.side === 'Short' ? { side: signal.side } : {}),
+        ...(Number.isFinite(signal.price) ? { price: Number(signal.price) } : {}),
+        ...(Number.isFinite(signal.tp) ? { tp: Number(signal.tp) } : {}),
+        ...(Number.isFinite(signal.sl) ? { sl: Number(signal.sl) } : {}),
+        signalId: signal.id,
+      })
+      setView('chart')
+      try {
+        window.history.replaceState(
+          null,
+          '',
+          buildChartFocusSearch({
+            symbol,
+            interval: iv,
+            signalTime,
+            ...(signal.side === 'Long' || signal.side === 'Short' ? { side: signal.side } : {}),
+          }),
+        )
+      } catch {
+        /* history unavailable — navigation still works in-memory */
+      }
+    },
+    [],
+  )
+
+  // manual toolbar changes drop the focus (mission §7.1: «اندکی که کاربر
+  // خودش نماد/بازه را عوض کند، فوکوس باید بیفتد») — ChartView only fires
+  // these on real user changes, not on goToSignal-driven prop updates.
+  const handleChartSymbol = useCallback(
+    (s: string) => {
+      setChartSymbol(s)
+      clearChartFocus()
+    },
+    [clearChartFocus],
+  )
+
+  const handleChartInterval = useCallback(
+    (i: string) => {
+      setChartInterval(i)
+      clearChartFocus()
+    },
+    [clearChartFocus],
+  )
 
   const runCycle = useCallback(async () => {
     if (running) return
@@ -143,6 +259,17 @@ function Shell() {
   const meta = VIEW_META[view]
   const showRun = view === 'automation'
 
+  const focusPayload: ChartFocusPayload | null = chartFocus
+    ? {
+        signalTime: chartFocus.signalTime,
+        ...(chartFocus.side ? { side: chartFocus.side } : {}),
+        ...(chartFocus.price != null ? { price: chartFocus.price } : {}),
+        ...(chartFocus.tp != null ? { tp: chartFocus.tp } : {}),
+        ...(chartFocus.sl != null ? { sl: chartFocus.sl } : {}),
+        ...(chartFocus.signalId != null ? { signalId: chartFocus.signalId } : {}),
+      }
+    : null
+
   return (
     <>
       <Sidebar
@@ -164,9 +291,18 @@ function Shell() {
         />
         <div key={`${view}-${refreshKey}`} className="view-enter" style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
           {view === 'automation' ? (
-            <AutomationView refreshKey={refreshKey} onRefreshAll={bumpRefresh} onGoChart={(s) => { setChartSymbol(s); setView('chart') }} onRunCycle={runCycle} running={running} symbolStats={symbolStats} />
+            <AutomationView refreshKey={refreshKey} onRefreshAll={bumpRefresh} onGoChart={(s) => { setChartSymbol(s); clearChartFocus(); setView('chart') }} onGoSignal={goToSignal} onRunCycle={runCycle} running={running} symbolStats={symbolStats} />
           ) : null}
-          {view === 'chart' ? <ChartView initialSymbol={chartSymbol} onSymbolChange={setChartSymbol} /> : null}
+          {view === 'chart' ? (
+            <ChartView
+              initialSymbol={chartSymbol}
+              initialInterval={chartInterval}
+              focus={focusPayload}
+              onSymbolChange={handleChartSymbol}
+              onIntervalChange={handleChartInterval}
+              onFocusDrop={clearChartFocus}
+            />
+          ) : null}
           {view === 'settings' ? <SettingsView onSaved={bumpRefresh} /> : null}
         </div>
         <footer className="app-footer">

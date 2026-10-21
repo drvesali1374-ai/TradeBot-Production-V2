@@ -50,6 +50,27 @@ export interface KlinesResponse {
   interval: string
 }
 
+/**
+ * A signal focus requested by navigation from the automation view's signals
+ * table (mission §7). ChartView centers the loaded window on the bar that
+ * CONTAINS signalTime, draws a marker + Entry/TP/SL lines for it.
+ *
+ * UNITS: signalTime = the signal's candleOpenTime in EPOCH MILLISECONDS
+ * (Toobit kline rows are ms; lightweight-charts Time is SECONDS — ChartView
+ * converts at the chart-API boundary only).
+ */
+export interface ChartFocusPayload {
+  /** signal candleOpenTime — epoch MILLISECONDS */
+  signalTime: number
+  side?: SignalSide
+  /** entry reference price (signal close) — enables the Entry price line */
+  price?: number
+  tp?: number
+  sl?: number
+  /** analysis signal id (marker/legend dedupe aid) */
+  signalId?: string
+}
+
 export interface TickerResponse {
   success: boolean
   price: number

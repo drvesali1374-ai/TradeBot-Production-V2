@@ -166,6 +166,8 @@ interface AutomationViewProps {
   refreshKey: number
   onRefreshAll: () => void
   onGoChart: (symbol: string) => void
+  /** §7 — navigate to the chart AT the signal's real candle (candleOpenTime ms). */
+  onGoSignal: (signal: Signal, interval: string) => void
   onRunCycle: () => void
   running: boolean
   /** Per-symbol closed-trade stats (mission §8-UI) — fetched by the shell. */
@@ -189,7 +191,7 @@ interface AnalysisPayload {
   meta: { closedCount: number; candleCount: number }
 }
 
-export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onRunCycle, running, symbolStats }: AutomationViewProps) {
+export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal, onRunCycle, running, symbolStats }: AutomationViewProps) {
   const { show } = useToast()
 
   const [status, setStatus] = useState<StatusPayload | null>(null)
@@ -872,6 +874,16 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onRunCycle
 
   /* ---------------- signals table ---------------- */
 
+  // §7 — the whole row navigates to the chart at the signal's candle.
+  // The interval comes from the analysis that PRODUCED the signal so the
+  // chart loads the same timeframe the engine analyzed.
+  const goSignal = useCallback(
+    (s: Signal & { status?: string }) => {
+      onGoSignal(s, analysis?.interval ?? '1h')
+    },
+    [onGoSignal, analysis],
+  )
+
   const signalColumns: DataColumn<Signal & { status?: string }>[] = [
     {
       key: 'time',
@@ -915,7 +927,17 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onRunCycle
       width: '70px',
       align: 'center',
       render: (s) => (
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => onGoChart(shortSymbol(s.symbol))} data-tooltip="نمایش در چارت" aria-label={`نمایش ${shortSymbol(s.symbol)} در چارت`}>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          style={{ padding: '4px 5px' }}
+          onClick={(e) => {
+            e.stopPropagation() // row onClick must not double-fire
+            goSignal(s)
+          }}
+          title="نمایش در چارت حرفه‌ای"
+          aria-label={`نمایش ${shortSymbol(s.symbol)} در چارت حرفه‌ای`}
+        >
           <i className="ph ph-candlestick-chart" aria-hidden />
         </button>
       ),
@@ -1323,6 +1345,7 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onRunCycle
               columns={signalColumns}
               rows={[...analysis.signals].reverse().slice(0, 12)}
               rowKey={(s) => s.id}
+              onRowClick={(s) => goSignal(s)}
               minWidth="600px"
               maxHeight={280}
               emptyState={
