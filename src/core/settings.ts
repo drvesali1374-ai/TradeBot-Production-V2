@@ -159,6 +159,9 @@ export function mergeAccountSettings(
 /* ------------------------------------------------------------------ */
 
 export function isSignalExpired(signal: Signal, settings: AutomationSettings, now = Date.now()): boolean {
-  const ageMs = now - signal.signalConfirmedAt
+  // REFERENCE FIDELITY (mission §6): the reference measures age from the
+  // signal candle's OPEN time (signal.timestamp = candle open,
+  // automation-manager.js:1189-1197) — not from its close.
+  const ageMs = now - signal.candleOpenTime
   return ageMs > settings.signalExpirationHours * 3600_000
 }

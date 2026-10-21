@@ -35,8 +35,14 @@ export interface RiskContext {
   price: number
   /** Existing same-symbol positions (direction-agnostic margin sum) */
   symbolPositions: OpenPosition[]
-  /** Candles AFTER the signal candle (closed only) */
+  /** Candles AFTER the signal candle — INCLUDING the forming one */
   postSignalCandles: { open: number; close: number }[]
+  /**
+   * REFERENCE FIDELITY (mission §6): price of the latest same-direction
+   * OPEN fill from the exchange trade history (getLastEntryPrice,
+   * automation-manager.js:3440-3475) — NOT the open position's avgPrice.
+   */
+  lastOpenPrice: number | null
 }
 
 export function round2(n: number): number {
@@ -82,20 +88,19 @@ export function evaluateRiskControls(
   // --- 2. Price distance (only when symbol has an open position) ---
   if (symbolPositions.length > 0) {
     const minDist = isLong ? settings.minPriceDistancePercentLong : settings.minPriceDistancePercentShort
-    // Last entry = highest entry among same-side positions (reference used last entry)
-    const sameSide = symbolPositions.filter((p) => p.side === (isLong ? 'LONG' : 'SHORT'))
-    if (sameSide.length > 0) {
-      const knownEntry = sameSide.filter((p) => p.entryPrice != null).at(-1)?.entryPrice ?? null
-      if (knownEntry == null) {
-        // Exchange did not provide an entry price — indeterminable, NEVER
-        // fabricated as zero (mission §1.2.6). Conservative: block entry.
-        results.push({
-          control: 'PRICE_DISTANCE',
-          passed: false,
-          message: 'کنترل فاصله قیمت قابل ارزیابی نیست — قیمت ورود پوزیشن باز از صرافی دریافت نشد.',
-          math: 'قیمت ورود قبلی: نامشخص',
-        })
-      } else {
+    // Reference: lastEntryPrice = latest same-direction OPEN fill from
+    // the trade history; null when none exists (control then skipped).
+    const knownEntry = ctx.lastOpenPrice
+    if (knownEntry == null) {
+      // No same-direction OPEN fill in history — reference skips this
+      // control entirely (getLastEntryPrice → null → condition unmet).
+      results.push({
+        control: 'PRICE_DISTANCE',
+        passed: true,
+        message: 'کنترل فاصله قیمت نادیده گرفته شد — ورودی هم‌جهت در تاریخچه یافت نشد (مطابق مرجع).',
+        math: 'قیمت ورود قبلی: نامشخص',
+      })
+    } else {
         const distancePct = isLong
           ? ((knownEntry - ctx.price) / knownEntry) * 100
           : ((ctx.price - knownEntry) / knownEntry) * 100
@@ -110,7 +115,6 @@ export function evaluateRiskControls(
             ? `((قیمت ورود قبلی ${fa(knownEntry)} − قیمت فعلی ${fa(ctx.price)}) ÷ ${fa(knownEntry)}) × ۱۰۰ = ${fa(distancePct)}٪`
             : `((قیمت فعلی ${fa(ctx.price)} − قیمت ورود قبلی ${fa(knownEntry)}) ÷ ${fa(knownEntry)}) × ۱۰۰ = ${fa(distancePct)}٪`,
         })
-      }
     }
   }
 
@@ -141,37 +145,38 @@ export function evaluateRiskControls(
   })
 
   // --- 5. Same-direction candles (only when configured > 0) ---
+  // REFERENCE FIDELITY (mission §6, automation-manager.js:2341-2434):
+  //   candlesAfterSignal = ALL candles after the signal candle (INCLUDING
+  //   the forming one); if fewer than required → reject; otherwise the
+  //   FIRST `required` candles must EACH be same-direction (strict close
+  //   vs open; doji → reject). PREFIX semantics — not trailing-runs.
   if (settings.minSameDirectionCandles > 0) {
     const required = settings.minSameDirectionCandles
-    const aligned = ctx.postSignalCandles.filter((c) =>
-      isLong ? c.close > c.open : c.close < c.open
-    )
-    const consecutive = countTrailingConsecutive(ctx.postSignalCandles, isLong)
-    const candlesPassed = consecutive >= required
+    const after = ctx.postSignalCandles
+    const enough = after.length >= required
+    let allSame = enough
+    if (enough) {
+      for (let k = 0; k < required; k++) {
+        const c = after[k]
+        const same = isLong ? c.close > c.open : c.close < c.open
+        if (!same) {
+          allSame = false
+          break
+        }
+      }
+    }
     results.push({
       control: 'SAME_DIRECTION_CANDLES',
-      passed: candlesPassed,
-      message: candlesPassed
-        ? `تأیید ${required} کندل هم‌جهت انجام شد (${consecutive} کندل).`
-        : `کنترل کندل هم‌جهت رد شد — ${consecutive} از ${required} کندل هم‌جهت هستند.`,
-      math: `کندل‌های هم‌جهت متوالی بعد از سیگنال: ${consecutive} | حد لازم: ${required}`,
+      passed: allSame,
+      message: allSame
+        ? `تأیید ${required} کندل هم‌جهت انجام شد.`
+        : enough
+          ? `کنترل کندل هم‌جهت رد شد — ${required} کندل اول بعد از سیگنال، همه هم‌جهت نیستند.`
+          : `کنترل کندل هم‌جهت رد شد — کندل‌های بعد از سیگنال کافی نیستند (${after.length} از ${required}).`,
+      math: `کندل‌های بعد از سیگنال: ${after.length} (شامل کندل جاری) | حد لازم: ${required} | بررسی: ${required} کندل اول`,
     })
-    void aligned
   }
 
   const rejection = results.find((r) => !r.passed)
   return { passed: !rejection, results, rejection }
-}
-
-function countTrailingConsecutive(
-  candles: { open: number; close: number }[],
-  isLong: boolean
-): number {
-  let count = 0
-  for (let i = candles.length - 1; i >= 0; i--) {
-    const ok = isLong ? candles[i].close > candles[i].open : candles[i].close < candles[i].open
-    if (ok) count++
-    else break
-  }
-  return count
 }

@@ -129,12 +129,21 @@ export interface OpenPosition {
   unrealizedPnL: number | null
   /** PnL rate in PERCENT units (fraction ×100 at the normalizer) */
   profitRate: number | null
-  /** Toobit's positions endpoint does not expose TP/SL — null until exposed */
+  /**
+   * TP/SL read from the conditional-orders endpoint (STOP_PROFIT_LOSS
+   * rows joined by symbol + position side) — null when not set.
+   */
   takeProfit?: number | null
   stopLoss?: number | null
+  /**
+   * Tri-state (mission §2.2): 'ok' = read-back succeeded (null ⇒ really
+   * not set → «تنظیم نشده»); 'unknown' = read-back FAILED (values may
+   * exist but could not be fetched → «نامشخص»). Never conflate the two.
+   */
+  tpslStatus?: 'ok' | 'unknown'
 }
 
-/** Closed position — `realizedPnlRate` in PERCENT units (fraction ×100). */
+/** Closed position — `realizedPnlRate` in PERCENT units (fraction ×100; live-probe verified: raw is a fraction, e.g. -0.02300216 = -2.30%). */
 export interface ClosedPosition {
   id: string
   symbol: string
@@ -147,6 +156,25 @@ export interface ClosedPosition {
   realizedPnlRate: number
   leverage: number
   closeReason?: 'TP' | 'SL' | 'MANUAL' | 'UNKNOWN'
+}
+
+/**
+ * Per-symbol closed-trade statistics (mission §8) — computed from the
+ * exchange's closed-position history (historyPositions), NOT from signals
+ * or open positions. `netIncome` sums realizedPnL (after-fee realized
+ * value, live-verified: realizedPnL = realizedPnLWithoutFee − openFee −
+ * closeFee). `winRate` = winning / closed trades in PERCENT.
+ */
+export interface SymbolStat {
+  symbol: string
+  closedTrades: number
+  winningTrades: number
+  losingTrades: number
+  breakevenTrades: number
+  /** percent, e.g. 57.14 */
+  winRate: number
+  /** USDT, after fees (realizedPnL sum) */
+  netIncome: number
 }
 
 /* ------------------------------------------------------------------ */
@@ -174,6 +202,7 @@ export type CycleAction =
   | 'NO_SIGNAL'
   | 'SIGNAL_EXPIRED'
   | 'SIGNAL_STALE'
+  | 'SIGNAL_ALREADY_OPENED'
   | 'ALREADY_PROCESSED'
   | 'RISK_REJECTED'
   | 'POSITION_OPENED'

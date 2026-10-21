@@ -23,28 +23,36 @@ export function resolveSignalStatus(
   const statuses = new Map<string, SignalStatus>()
   for (const s of signals) statuses.set(s.id, 'NOT_OPENED')
 
+  // Symbol forms differ across sources (Signal.symbol is short "BTC",
+  // exchange fills carry "BTC-SWAP-USDT") — normalize before comparing.
+  const short = (sym: string) => String(sym).toUpperCase().replace(/-SWAP-USDT$/, '')
+
   // Mark OPENED for signals followed by a same-direction fill within
-  // [signalConfirmedAt, nextSignalConfirmedAt)
-  const sorted = [...signals].sort((a, b) => a.signalConfirmedAt - b.signalConfirmedAt)
+  // [candleOpenTime, nextSignal's candleOpenTime) — REFERENCE FIDELITY
+  // (mission §6): the reference signal `timestamp` is the candle OPEN
+  // time, so a fill during the signal candle itself already counts as
+  // OPENED for that signal (automation-manager.js:1120-1182).
+  const sorted = [...signals].sort((a, b) => a.candleOpenTime - b.candleOpenTime)
   for (let i = 0; i < sorted.length; i++) {
     const s = sorted[i]
     const next = sorted[i + 1]
-    const windowEnd = next ? next.signalConfirmedAt : Infinity
+    const windowEnd = next ? next.candleOpenTime : Infinity
     const targetSide = s.side === 'Long' ? 'LONG' : 'SHORT'
     const matched = fills.some(
       (f) =>
-        f.symbol === s.symbol &&
+        short(f.symbol) === short(s.symbol) &&
         f.side === targetSide &&
-        f.time >= s.signalConfirmedAt &&
+        f.time >= s.candleOpenTime &&
         f.time < windowEnd
     )
     if (matched) statuses.set(s.id, 'OPENED')
   }
 
-  // Latest signal: PENDING or EXPIRED
+  // Latest signal: PENDING or EXPIRED (age from the candle OPEN time —
+  // reference signal.timestamp semantics, automation-manager.js:1189-1197)
   const latest = sorted[sorted.length - 1]
   if (latest && statuses.get(latest.id) !== 'OPENED') {
-    const expired = now - latest.signalConfirmedAt > expirationHours * 3600_000
+    const expired = now - latest.candleOpenTime > expirationHours * 3600_000
     statuses.set(latest.id, expired ? 'EXPIRED' : 'PENDING')
   }
   return statuses

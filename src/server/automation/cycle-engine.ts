@@ -15,6 +15,7 @@
 import {
   analyzeSymbol,
   isSignalExpired,
+  resolveSignalStatus,
   evaluateRiskControls,
   calculateNewMargin,
   getSymbolMargin,
@@ -22,6 +23,7 @@ import {
   splitClosedCandles,
   STRATEGY_VERSION,
 } from '@/core'
+import { fullSymbol } from '@/server/exchanges/toobit/endpoints'
 import type { CycleResult, CycleAction, SymbolEntry, LogRecord, StepLog, LogStatus } from '@/core/types'
 import type { AutomationSettings } from '@/core/settings'
 import { getStorage, STORAGE_KEYS, WriteBatcher, LOGS_CAP } from '@/server/storage'
@@ -179,7 +181,63 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
         return finish('NO_SIGNAL')
       }
 
-      /* ---- Step 8: signal freshness ---- */
+      /* ---- Step 8: trade history + signal status (REFERENCE GATE) ---- */
+      // Reference (automation-manager.js:2778-2849 + 1414-1445): the
+      // latest signal is tradeable ONLY in «در انتظار» status — history
+      // fills decide. Without this gate the engine could re-trade an
+      // already-opened signal on the next cycle (critical fidelity fix).
+      ctx.beginStep()
+      let historyFills: { time: number; side: 'LONG' | 'SHORT'; symbol: string; price: number | null }[] = []
+      let lastOpenPrice: number | null = null
+      try {
+        const rawFills = await client.getUserTrades(symbol, 100)
+        const full = fullSymbol(symbol).toUpperCase()
+        for (const row of rawFills as Record<string, unknown>[]) {
+          const t = Number(row.time)
+          const rowSide = String(row.side ?? '')
+          const rowSym = String(row.symbol ?? '').toUpperCase()
+          if (!Number.isFinite(t) || !rowSide || rowSym !== full) continue
+          if (!rowSide.includes('OPEN')) continue
+          const dir: 'LONG' | 'SHORT' = rowSide.includes('BUY') ? 'LONG' : 'SHORT'
+          const price = Number(row.price)
+          historyFills.push({ time: t, side: dir, symbol: rowSym, price: Number.isFinite(price) ? price : null })
+        }
+        // getLastEntryPrice (ref :3440-3475): latest same-direction OPEN fill
+        for (let i = historyFills.length - 1; i >= 0; i--) {
+          if (historyFills[i].price != null) {
+            lastOpenPrice = historyFills[i].price as number
+            break
+          }
+        }
+        ctx.step('تاریخچه معاملات', 'ok', `${historyFills.length} معامله بازکردن برای نماد یافت شد`, {
+          fills: historyFills.length,
+          lastOpenPrice,
+        })
+      } catch (e) {
+        // History unavailable → cannot verify status; the reference would
+        // also fail the cycle here (fetchPositionHistory throws) — abort
+        // rather than risk re-opening an already-opened signal.
+        ctx.step('تاریخچه معاملات', 'failed', `دریافت تاریخچه ناموفق: ${e instanceof Error ? e.message : 'خطا'}`)
+        throw e
+      }
+
+      const statuses = resolveSignalStatus(analysis.signals, historyFills, ctx.settings.signalExpirationHours, now)
+      const pendingStatus = statuses.get(pending.id) ?? 'NOT_OPENED'
+      if (pendingStatus === 'OPENED') {
+        ctx.step('وضعیت سیگنال', 'skipped', 'این سیگنال قبلاً باز شده است — رد شد', {
+          signalId: pending.id,
+          status: pendingStatus,
+        })
+        ctx.markCycleEnd()
+        await batcher.persist()
+        return finish('SIGNAL_ALREADY_OPENED', { signal: pending })
+      }
+      ctx.step('وضعیت سیگنال', 'ok', 'سیگنال در وضعیت «در انتظار» است — قابل معامله', {
+        signalId: pending.id,
+        status: pendingStatus,
+      })
+
+      /* ---- Step 8b: signal freshness ---- */
       ctx.beginStep()
       if (isSignalExpired(pending, ctx.settings, now)) {
         ctx.step('بررسی تازگی سیگنال', 'skipped', 'سیگنال منقضی شده است', {
@@ -202,12 +260,20 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
 
       /* ---- Step 9: price, balance, positions ---- */
       ctx.beginStep()
-      const price = await client.getTickerPrice(symbol)
+      // REFERENCE FIDELITY (mission §6): the cycle price is the close of
+      // the most recent 1h kline (fetchPrice, automation-manager.js:2763-
+      // 2776 — `klines[0][4]` of a limit=1 fetch = the FORMING candle's
+      // current close). The order-qty price stays the ticker (the ref's
+      // create-position route fetches the ticker server-side).
+      const price = analysis.allCandles.length
+        ? analysis.allCandles[analysis.allCandles.length - 1].close
+        : await client.getTickerPrice(symbol)
       const balance = await client.getBalance()
       const positions = await client.getOpenPositions()
       const symbolPositions = positions.filter((p) => p.symbol.toUpperCase().startsWith(`${symbol.toUpperCase()}-`))
       ctx.step('حساب و پوزیشن‌ها', 'ok', 'قیمت، موجودی و پوزیشن‌ها دریافت شد', {
         price,
+        priceSource: 'آخرین کندل (مطابق مرجع)',
         total: balance.total,
         free: balance.free,
         openPositions: positions.length,
@@ -228,16 +294,28 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
           closeRes.closed > 0 ? 'ok' : 'failed',
           closeRes.closed > 0
             ? `${closeRes.closed} پوزیشن مخالف بسته شد`
-            : 'بستن پوزیشن مخالف ناموفق بود',
+            : 'بستن پوزیشن مخالف ناموفق بود — مطابق مرجع، چرخه ادامه می‌یابد',
           { closed: closeRes.closed, total: closeRes.total, errors: closeRes.errors }
         )
-        if (closeRes.closed === 0) {
-          ctx.markCycleEnd()
-          await batcher.persist()
-          return finish('ERROR', { error: 'بستن پوزیشن مخالف ناموفق بود' })
-        }
+        // REFERENCE FIDELITY (mission §6): close failure is NON-FATAL
+        // (automation-manager.js:2921-2924 downgrades errors and the
+        // cycle proceeds to open the new position regardless).
       } else {
         ctx.step('بستن پوزیشن مخالف', 'skipped', 'پوزیشن مخالفی وجود ندارد')
+      }
+
+      /* ---- Step 10b: refresh open positions (reference step 11) ---- */
+      ctx.beginStep()
+      let freshPositions = symbolPositions
+      try {
+        freshPositions = (await client.getOpenPositions()).filter(
+          (p) => p.symbol.toUpperCase().startsWith(`${symbol.toUpperCase()}-`)
+        )
+        ctx.step('بررسی پوزیشن‌های باز', 'ok', `${freshPositions.length} پوزیشن باز برای نماد`, {
+          symbolPositions: freshPositions.length,
+        })
+      } catch (e) {
+        ctx.step('بررسی پوزیشن‌های باز', 'warning', `بررسی مجدد ناموفق (${e instanceof Error ? e.message : 'خطا'}) — از داده قبلی استفاده شد`)
       }
 
       /* ---- Step 11: margin + risk controls ---- */
@@ -247,8 +325,8 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
       const leverage = isLong ? ctx.settings.leverageLong : ctx.settings.leverageShort
       const newMargin = calculateNewMargin(balance.total, entryMarginPercent)
 
-      const postSignalCandles = analysis.closedCandles
-        .filter((c) => c.closeTime > pending.candleCloseTime)
+      const postSignalCandles = analysis.allCandles
+        .filter((c) => c.openTime > pending.candleOpenTime)
         .map((c) => ({ open: c.open, close: c.close }))
 
       const risk = evaluateRiskControls(
@@ -257,8 +335,9 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
           balance: { total: balance.total, free: balance.free },
           newMargin,
           price,
-          symbolPositions: oppositeClosed ? [] : symbolPositions,
+          symbolPositions: freshPositions,
           postSignalCandles,
+          lastOpenPrice,
         },
         ctx.settings
       )

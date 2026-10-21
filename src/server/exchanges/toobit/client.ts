@@ -175,9 +175,50 @@ export class ToobitClient {
     return arrayFrom(data).map(normalizePosition)
   }
 
-  async getHistoryPositions(): Promise<ClosedPosition[]> {
+  /**
+   * Raw STOP_PROFIT_LOSS conditional orders (TP/SL read-back) — live-
+   * verified contract (mission-3): rows carry `stopPrice`, `orderType`
+   * (STOP_{LONG|SHORT}_{PROFIT|LOSS}) and `status` (ORDER_NEW = active).
+   */
+  async getStopOrders(): Promise<Record<string, unknown>[]> {
     this.requireCredentials()
-    const ep = endpoints.historyPositions(RECV_WINDOW_DEFAULT, 0)
+    const ep = endpoints.stopOrders({ recvWindow: RECV_WINDOW_DEFAULT, timestamp: 0 })
+    const data = await this.signedGet(ep.path, ep.query)
+    return arrayFrom(data)
+  }
+
+  /**
+   * Open positions WITH TP/SL joined from the conditional-orders
+   * endpoint (mission §2). One extra signed GET. On stop-orders failure
+   * every position is still returned with `tpslStatus: 'unknown'` — the
+   * UI then shows «نامشخص», never a fabricated «تنظیم نشده».
+   */
+  async getOpenPositionsFull(): Promise<OpenPosition[]> {
+    const positions = await this.getOpenPositions()
+    let stops: Record<string, unknown>[] | null = null
+    try {
+      stops = await this.getStopOrders()
+    } catch {
+      stops = null // read-back failed → unknown (tri-state, mission §2.2)
+    }
+    if (stops === null) {
+      return positions.map((p) => ({ ...p, takeProfit: null, stopLoss: null, tpslStatus: 'unknown' as const }))
+    }
+    const map = buildTpslMap(stops)
+    return positions.map((p) => {
+      const tpsl = map.get(`${p.symbol}|${p.side}`)
+      return {
+        ...p,
+        takeProfit: tpsl?.takeProfit ?? null,
+        stopLoss: tpsl?.stopLoss ?? null,
+        tpslStatus: 'ok' as const,
+      }
+    })
+  }
+
+  async getHistoryPositions(limit?: number): Promise<ClosedPosition[]> {
+    this.requireCredentials()
+    const ep = endpoints.historyPositions({ limit, recvWindow: RECV_WINDOW_DEFAULT, timestamp: 0 })
     const data = await this.signedGet(ep.path, ep.query)
     return arrayFrom(data).map(normalizeHistoryPosition).sort((a, b) => b.closeTime - a.closeTime)
   }
@@ -322,6 +363,33 @@ function fractionToPercent(v: unknown): number | null {
 /* ---------------------------------------------------------------- */
 
 /**
+ * STOP_PROFIT_LOSS rows → per (symbol|side) TP/SL map.
+ * orderType encodes position side + kind: STOP_LONG_PROFIT → TP of a
+ * LONG position, STOP_SHORT_LOSS → SL of a SHORT position, etc. Only
+ * ORDER_NEW rows are active. Multiple rows of one kind → latest wins
+ * (trading-stop overwrites per position; last write is authoritative).
+ */
+export function buildTpslMap(stops: Record<string, unknown>[]): Map<string, { takeProfit: number | null; stopLoss: number | null }> {
+  const map = new Map<string, { takeProfit: number | null; stopLoss: number | null }>()
+  for (const row of stops) {
+    const status = String(row.status ?? '')
+    if (status && status !== 'ORDER_NEW') continue
+    const orderType = String(row.orderType ?? '')
+    const symbol = String(row.symbol ?? '').toUpperCase()
+    const price = toNum(row.stopPrice)
+    if (!symbol || price == null) continue
+    const side = orderType.includes('_LONG_') ? 'LONG' : orderType.includes('_SHORT_') ? 'SHORT' : null
+    if (!side) continue
+    const key = `${symbol}|${side}`
+    const cur = map.get(key) ?? { takeProfit: null, stopLoss: null }
+    if (orderType.endsWith('_PROFIT')) cur.takeProfit = price
+    else if (orderType.endsWith('_LOSS')) cur.stopLoss = price
+    map.set(key, cur)
+  }
+  return map
+}
+
+/**
  * GET /api/v1/futures/positions row → OpenPosition.
  * profitRate (fraction) is converted to PERCENT units here, exactly
  * once. All missing/invalid numeric fields become null → the UI shows
@@ -340,10 +408,12 @@ export function normalizePosition(p: Record<string, unknown>): OpenPosition {
     markPrice: toNum(p.markPrice),
     unrealizedPnL: toNum(p.unrealizedPnL ?? p.unRealizedPnl),
     profitRate: fractionToPercent(p.profitRate),
-    // Toobit's open-position payload does not expose TP/SL (docs) —
-    // keep the fields for future exposure but they stay null here.
+    // TP/SL come from the separate STOP_PROFIT_LOSS read-back
+    // (getOpenPositionsFull); the positions payload itself carries none
+    // — live-verified (mission-3 probe).
     takeProfit: null,
     stopLoss: null,
+    tpslStatus: 'ok',
   }
 }
 

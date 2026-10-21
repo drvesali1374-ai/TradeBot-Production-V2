@@ -34,11 +34,29 @@ export const endpoints = {
     query: { recvWindow, timestamp },
     signed: true,
   }),
-  /** Signed — closed positions history (all symbols). */
-  historyPositions: (recvWindow: number, timestamp: number) => ({
+  /**
+   * Signed — open conditional orders (TP/SL read-back).
+   * VERIFIED LIVE (mission-3 probe) + official docs (api-docs.toobit.com,
+   * "Query current open orders"): `type` defaults to LIMIT which HIDES TP/SL
+   * rows — `type=STOP_PROFIT_LOSS` is mandatory. Response rows carry
+   * `stopPrice` (trigger) + `orderType` (STOP_LONG_PROFIT |
+   * STOP_LONG_LOSS | STOP_SHORT_PROFIT | STOP_SHORT_LOSS) + status ORDER_NEW.
+   */
+  stopOrders: (params: { recvWindow: number; timestamp: number }) => ({
+    method: 'GET' as const,
+    path: '/api/v1/futures/openOrders',
+    query: { type: 'STOP_PROFIT_LOSS', recvWindow: params.recvWindow, timestamp: params.timestamp },
+    signed: true,
+  }),
+  /**
+   * Signed — closed positions history (all symbols). Live-verified:
+   * `limit` is honored (docs max 1000, LIVE CAP 200 — probe `?limit=200`
+   * returned 200 rows); `pageSize` is silently ignored. Cursor = row `id`.
+   */
+  historyPositions: (params: { limit?: number; recvWindow: number; timestamp: number }) => ({
     method: 'GET' as const,
     path: '/api/v1/futures/historyPositions',
-    query: { recvWindow, timestamp },
+    query: (params.limit ? { limit: params.limit, recvWindow: params.recvWindow, timestamp: params.timestamp } : { recvWindow: params.recvWindow, timestamp: params.timestamp }) as Record<string, string | number>,
     signed: true,
   }),
   /**

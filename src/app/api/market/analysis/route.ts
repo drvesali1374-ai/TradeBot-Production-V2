@@ -4,9 +4,9 @@
  * the cycle engine uses). NEVER places orders.
  */
 import { json, jsonError, requireAuth, isResponse } from '../../_lib'
-import { ToobitClient } from '@/server/exchanges/toobit'
+import { ToobitClient, fullSymbol } from '@/server/exchanges/toobit'
 import { analyzeSymbol, intervalToMs, resolveSignalStatus } from '@/core'
-import { loadAutomationSettings } from '@/server/configuration/settings-service'
+import { loadAutomationSettings, loadAccountSettings } from '@/server/configuration/settings-service'
 
 export async function GET(req: Request) {
   const session = await requireAuth(req)
@@ -16,21 +16,33 @@ export async function GET(req: Request) {
   if (!symbol) return jsonError('symbol الزامی است', 400)
   const settings = await loadAutomationSettings()
 
-  const client = new ToobitClient({ apiKey: '', secretKey: '' })
+  // Signed client when credentials exist — signal statuses are resolved
+  // against REAL fills (mission §6); on failure they fall back to the
+  // age-only PENDING/EXPIRED view (never fabricated OPENED).
+  const account = await loadAccountSettings()
+  const client = new ToobitClient({ apiKey: account.apiKey, secretKey: account.secretKey })
   try {
     const raw = await client.getKlines(symbol, settings.interval, settings.limit)
     const ms = intervalToMs(settings.interval)
     const candles = raw.map((c) => ({ ...c, closeTime: c.openTime + ms }))
     const analysis = analyzeSymbol({ symbol, candles, settings, now: Date.now() })
-    // Status resolution uses only real fill data. With no signed fill
-    // source wired here, statuses fall back to PENDING/EXPIRED — the
-    // cycle engine resolves the truth at execution time. Nothing is
-    // fabricated (mission §13).
-    const statuses = resolveSignalStatus(
-      analysis.signals,
-      [],
-      settings.signalExpirationHours
-    )
+    let fills: { time: number; side: 'LONG' | 'SHORT'; symbol: string }[] = []
+    if (client.hasCredentials) {
+      try {
+        const rows = (await client.getUserTrades(symbol, 100)) as Record<string, unknown>[]
+        const full = fullSymbol(symbol).toUpperCase()
+        for (const row of rows) {
+          const t = Number(row.time)
+          const rowSide = String(row.side ?? '')
+          const rowSym = String(row.symbol ?? '').toUpperCase()
+          if (!Number.isFinite(t) || !rowSide.includes('OPEN') || rowSym !== full) continue
+          fills.push({ time: t, side: rowSide.includes('BUY') ? 'LONG' : 'SHORT', symbol: rowSym })
+        }
+      } catch {
+        fills = [] // status falls back to age-only resolution
+      }
+    }
+    const statuses = resolveSignalStatus(analysis.signals, fills, settings.signalExpirationHours)
     return json({
       success: true,
       symbol: symbol.toUpperCase(),
