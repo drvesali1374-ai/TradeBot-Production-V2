@@ -201,7 +201,10 @@ export function SettingsView({ onSaved }: { onSaved: () => void }) {
         ) : null}
       </div>
 
-      <div style={{ padding: 22, maxHeight: 'calc(100vh - 260px)', overflowY: 'auto' }}>
+      {/* item 15 — NO inner scroll container: the settings content flows
+          naturally and the PAGE is the single scrollbar (the old
+          maxHeight+overflowY created a second scrollbar on small screens). */}
+      <div style={{ padding: 22 }}>
         {/* ============== TAB 1: account ============== */}
         {tab === 'account' ? (
           <div style={{ maxWidth: 620 }}>

@@ -13,12 +13,12 @@
  *    (نامشخص) — never a fabricated zero.
  *  - missing exchange credentials → explicit warning box, no fake data.
  *
- * Sections (mission §9 layout):
- *  1. top-grid: [نمادها و زمان‌بندی ~1fr | stats-inpage twin] | [§3 unified
- *     cycle+log panel ~2fr] — stacks full-width ≤1280px
- *  2. market data + signals (full width)
- *  3. open positions (full width)
- *  4. balance & risk (full width)
+ * Sections (item 12/14 layout):
+ *  1. top-grid: [نمادها و زمان‌بندی ~1fr] | [§3 unified cycle+log panel ~2fr]
+ *     — stacks full-width ≤1280px
+ *  2. open positions (full width — item 12: ABOVE market data)
+ *  3. market data + signals (full width)
+ *  4. bottom-grid (item 14): [موجودی و ریسک | آمار معاملات نمادها] two columns
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { apiGet, apiPost } from '@/modules/common/api'
@@ -27,6 +27,7 @@ import { DataTable, type DataColumn } from '@/modules/common/DataTable'
 import { fmtNum, fmtPrice, fmtUsd, fmtPct, fmtDateTime, fmtDurationFa, fmtQty, pnlColor, shortSymbol, fmtUsdtAmount, tpslLabel, type TpslLabel } from '@/modules/common/format'
 import type { CycleResult, SymbolEntry, OpenPosition, LogRecord, BalanceInfo, Signal, LogStatus } from '@/core/types'
 import { CloseConfirmDialog } from '@/modules/automation/CloseConfirmDialog'
+import { LogExpandedDetails, SOURCE_LABELS } from '@/modules/automation/LogDetails'
 import { SymbolStatsTable, SymbolStatsCoverageNote, type SymbolStatsPayload } from '@/modules/automation/SymbolStatsTable'
 
 /* ------------------------------------------------------------------ */
@@ -107,12 +108,6 @@ const LOG_STATUS_META: Record<LogStatus, { text: string; cls: string }> = {
   SKIPPED: { text: 'رد/ردشده', cls: 'badge-accent' },
   WARNING: { text: 'هشدار', cls: 'badge-warning' },
   ERROR: { text: 'خطا', cls: 'badge-danger' },
-}
-
-const SOURCE_LABELS: Record<string, string> = {
-  manual: 'دستی',
-  cron: 'کرون',
-  system: 'سیستم',
 }
 
 /** «نامشخص» marker — used whenever the exchange did not send a value. */
@@ -476,17 +471,6 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
 
   const logHasFilters = Boolean(logSearch || logSymbol || logStatus || logCycle)
 
-  const parseDetails = (d: LogRecord['details']): Record<string, unknown> | null => {
-    if (d == null) return null
-    if (typeof d === 'object') return d
-    try {
-      const parsed = JSON.parse(d)
-      return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : null
-    } catch {
-      return null
-    }
-  }
-
   /**
    * Unified event table (mission §3.2) — cycle-level rows and step-level
    * rows come from THE SAME data source: the persisted LogRecords (every
@@ -501,7 +485,8 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
       width: '126px',
       align: 'end',
       ltr: true,
-      render: (l) => <span className="num" style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>{fmtDateTime(l.created_at)}</span>,
+      // item 3 — bold, high-contrast datetime (light: near-black / dark: near-white)
+      render: (l) => <span className="num cell-dt" style={{ fontSize: 10.5 }}>{fmtDateTime(l.created_at)}</span>,
     },
     {
       key: 'symbol',
@@ -582,76 +567,20 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
     },
   ]
 
-  const renderLogDetails = (l: LogRecord) => {
-    const details = parseDetails(l.details)
-    const detailsString = details ? null : (typeof l.details === 'string' ? l.details : null)
-    const isCurrentCycle = Boolean(l.cycleId && last && l.cycleId === last.cycleId)
-    return (
-      <div>
-        <div className="log-detail-grid">
-          <div className="log-detail-item">
-            <div className="log-detail-label">پیام</div>
-            <div style={{ fontSize: 12.5 }}>{l.message}</div>
-          </div>
-          <div className="log-detail-item">
-            <div className="log-detail-label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              شناسه چرخه
-              {isCurrentCycle ? (
-                <span className="badge badge-accent" style={{ fontSize: 9.5, padding: '1px 7px' }}>چرخه جاری</span>
-              ) : null}
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span className="log-detail-value mono" style={{ fontSize: 11 }}>{l.cycleId ?? UNKNOWN}</span>
-              {/* mission §3.4: the per-row funnel filter is GONE — the GLOBAL
-                  funnel (summary header + toolbar chip) is the one filter entry. */}
-              {l.cycleId ? (
-                <button type="button" className="btn btn-ghost btn-sm" onClick={() => copyText(l.cycleId!, 'شناسه چرخه')} title="کپی شناسه" aria-label="کپی شناسه چرخه">
-                  <i className="ph ph-copy" aria-hidden />
-                </button>
-              ) : null}
-            </div>
-          </div>
-          <div className="log-detail-item">
-            <div className="log-detail-label">منبع</div>
-            <div className="log-detail-value" style={{ fontSize: 12.5 }}>{SOURCE_LABELS[l.source ?? 'system'] ?? l.source ?? UNKNOWN}</div>
-          </div>
-          {l.step != null ? (
-            <div className="log-detail-item">
-              <div className="log-detail-label">مرحله</div>
-              <div className="log-detail-value" style={{ fontSize: 12.5 }}>
-                <span className="num">{l.step}</span>
-              </div>
-            </div>
-          ) : null}
-          {l.durationMs != null ? (
-            <div className="log-detail-item">
-              <div className="log-detail-label">مدت اجرا</div>
-              <div className="log-detail-value" style={{ fontSize: 12.5 }}>{fmtDurationFa(l.durationMs)}</div>
-            </div>
-          ) : null}
-        </div>
-        {details ? (
-          <div className="log-detail-kv">
-            {Object.entries(details).map(([k, v]) => (
-              <div className="log-detail-kv-row" key={k}>
-                <span className="log-detail-kv-key">{k}</span>
-                <span className="log-detail-kv-val">
-                  {v == null ? UNKNOWN : typeof v === 'object' ? JSON.stringify(v) : String(v)}
-                </span>
-              </div>
-            ))}
-          </div>
-        ) : detailsString ? (
-          <div className="log-detail-kv">
-            <div className="log-detail-kv-row">
-              <span className="log-detail-kv-key">توضیح</span>
-              <span className="log-detail-kv-val">{detailsString}</span>
-            </div>
-          </div>
-        ) : null}
-      </div>
-    )
-  }
+  /**
+   * Expanded row (item 2 redesign) — delegated to LogExpandedDetails:
+   * status+process head, full message, meta chips (bold Jalali time),
+   * cycle-id + copy, and the translated «جزئیات فنی» grid (typed values:
+   * dates → Jalali, booleans → ✓/✗, risk controls → pass/fail chips).
+   */
+  const renderLogDetails = (l: LogRecord) => (
+    <LogExpandedDetails
+      log={l}
+      isCurrentCycle={Boolean(l.cycleId && last && l.cycleId === last.cycleId)}
+      onCopy={copyText}
+      statusMeta={LOG_STATUS_META[l.status] ?? LOG_STATUS_META.INFO}
+    />
+  )
 
   /* ---------------- positions table columns (mission §1.2) ---------------- */
 
@@ -732,9 +661,9 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
       align: 'end',
       ltr: true,
       render: (p) => {
-        // mission §1.2 (inverted per spec): PERCENT is the primary/larger
-        // figure; the USDT amount is the secondary, smaller (opacity ~0.8)
-        // same-hue detail in parentheses. Both null → `— (—)` all muted.
+        // item 8 — percent and USDT amount at the SAME size (the owner
+        // explicitly rejected the smaller/secondary USDT rendering).
+        // Both null → `— (—)` all muted.
         if (p.unrealizedPnL == null && p.profitRate == null) {
           return (
             <span style={{ color: 'var(--text-muted)' }}>
@@ -743,11 +672,9 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
           )
         }
         return (
-          <span className="mono" style={{ color: pnlColor(p.unrealizedPnL) }}>
+          <span className="mono" style={{ color: pnlColor(p.unrealizedPnL), whiteSpace: 'nowrap' }}>
             {p.profitRate != null ? fmtPct(p.profitRate) : UNKNOWN}{' '}
-            <small style={{ opacity: 0.8 }}>
-              (<bdi className="num">{p.unrealizedPnL != null ? `${fmtUsdtAmount(p.unrealizedPnL)} USDT` : UNKNOWN}</bdi>)
-            </small>
+            (<bdi className="num">{p.unrealizedPnL != null ? `${fmtUsdtAmount(p.unrealizedPnL)} USDT` : UNKNOWN}</bdi>)
           </span>
         )
       },
@@ -806,11 +733,11 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
   const renderCellDateTime = (value: number | null) => {
     const text = fmtDateTime(value)
     if (text === UNKNOWN || !text.includes(', ')) {
-      return <span style={{ fontSize: 10, color: 'var(--text-muted)', display: 'inline-block' }}>{text}</span>
+      return <span className="cell-dt num" style={{ fontSize: 10, display: 'inline-block', direction: 'rtl', unicodeBidi: 'isolate' }}>{text}</span>
     }
     const [date, time] = text.split(', ')
     return (
-      <span style={{ fontSize: 10, color: 'var(--text-muted)', display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: 1.5 }} title={text}>
+      <span className="cell-dt num" style={{ fontSize: 10, display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: 1.5, direction: 'rtl', unicodeBidi: 'isolate' }} title={text}>
         <span style={{ whiteSpace: 'nowrap' }}>{date}،</span>
         <span style={{ whiteSpace: 'nowrap' }}>{time}</span>
       </span>
@@ -874,8 +801,9 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
 
   /* ---------------- signals table ---------------- */
 
-  // §7 — the whole row navigates to the chart at the signal's candle.
-  // The interval comes from the analysis that PRODUCED the signal so the
+  // item 7 — rows are NOT clickable anymore: navigation to the chart is
+  // ONLY the icon button in the عملیات column (no whole-row click). The
+  // interval comes from the analysis that PRODUCED the signal so the
   // chart loads the same timeframe the engine analyzed.
   const goSignal = useCallback(
     (s: Signal & { status?: string }) => {
@@ -891,7 +819,8 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
       width: '120px',
       align: 'end',
       ltr: true,
-      render: (s) => <span className="num" style={{ fontSize: 12 }}>{fmtDateTime(s.signalConfirmedAt)}</span>,
+      // item 3 — bold, high-contrast datetime
+      render: (s) => <span className="num cell-dt" style={{ fontSize: 12 }}>{fmtDateTime(s.signalConfirmedAt)}</span>,
     },
     {
       key: 'side',
@@ -931,10 +860,7 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
           type="button"
           className="btn btn-ghost btn-sm"
           style={{ padding: '4px 5px' }}
-          onClick={(e) => {
-            e.stopPropagation() // row onClick must not double-fire
-            goSignal(s)
-          }}
+          onClick={() => goSignal(s)}
           title="نمایش در چارت حرفه‌ای"
           aria-label={`نمایش ${shortSymbol(s.symbol)} در چارت حرفه‌ای`}
         >
@@ -993,18 +919,6 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
             </p>
           </PanelCard>
 
-          {/* §8-UI — the in-page twin of the sidebar stats table: rendered
-              only while the sidebar is off-canvas (≤1024px, CSS .stats-inpage).
-              On desktop the SIDEBAR carries the stats — never both at once. */}
-          <PanelCard
-            className="stats-inpage"
-            title="آمار معاملات نمادها"
-            icon="ph-fill ph-chart-bar"
-            actions={<RefreshBtn onClick={onRefreshAll} label="به‌روزرسانی آمار معاملات" />}
-          >
-            <SymbolStatsTable stats={symbolStats} variant="panel" label="آمار معاملات نمادها" />
-            <SymbolStatsCoverageNote stats={symbolStats} />
-          </PanelCard>
         </div>
 
         {/* grid second column (~2/3) — §3 ONE unified cycle+log panel:
@@ -1241,7 +1155,32 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
         </section>
       </div>
 
-      {/* ============ market data + signals (mission §7-§8) — full width below the top grid ============ */}
+      {/* ============ open positions (item 12 — ABOVE market data) ============ */}
+      <PanelCard
+        title={`پوزیشن‌های باز (${positions.length})`}
+        icon="ph-fill ph-arrows-down-up"
+        actions={<RefreshBtn onClick={refreshPositions} busy={positionsBusy} label="به‌روزرسانی پوزیشن‌ها و موجودی" />}
+      >
+        {credentialsMissing ? (
+          <CredentialsBox />
+        ) : positions.length === 0 ? (
+          <div className="empty-state">
+            <i className="ph ph-inbox" aria-hidden />
+            پوزیشن بازی وجود ندارد
+          </div>
+        ) : (
+          <DataTable
+            label="پوزیشن‌های باز"
+            columns={positionColumns}
+            rows={positions}
+            rowKey={(p) => p.symbol + p.side}
+            minWidth="680px"
+            maxHeight={320}
+          />
+        )}
+      </PanelCard>
+
+      {/* ============ market data + signals (mission §7-§8) ============ */}
       <PanelCard
         title="داده بازار و سیگنال‌ها"
         icon="ph-fill ph-chart-candlestick"
@@ -1345,7 +1284,6 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
               columns={signalColumns}
               rows={[...analysis.signals].reverse().slice(0, 12)}
               rowKey={(s) => s.id}
-              onRowClick={(s) => goSignal(s)}
               minWidth="600px"
               maxHeight={280}
               emptyState={
@@ -1364,88 +1302,74 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
         )}
       </PanelCard>
 
-      {/* ============ open positions (mission §1.2) ============ */}
-      <PanelCard
-        title={`پوزیشن‌های باز (${positions.length})`}
-        icon="ph-fill ph-arrows-down-up"
-        actions={<RefreshBtn onClick={refreshPositions} busy={positionsBusy} label="به‌روزرسانی پوزیشن‌ها و موجودی" />}
-      >
-        {credentialsMissing ? (
-          <CredentialsBox />
-        ) : positions.length === 0 ? (
-          <div className="empty-state">
-            <i className="ph ph-inbox" aria-hidden />
-            پوزیشن بازی وجود ندارد
-          </div>
-        ) : (
-          <DataTable
-            label="پوزیشن‌های باز"
-            columns={positionColumns}
-            rows={positions}
-            rowKey={(p) => p.symbol + p.side}
-            minWidth="680px"
-            maxHeight={320}
-          />
-        )}
-      </PanelCard>
-
-      {/* ============ balance & risk (mission §14 — explicit credentials state) — full width below ============ */}
-      <PanelCard
-        title="موجودی و ریسک"
-        icon="ph-fill ph-wallet"
-        actions={<RefreshBtn onClick={refreshBalance} busy={balanceBusy} label="به‌روزرسانی موجودی و پوزیشن‌ها" />}
-      >
-        {credentialsMissing ? (
-          <CredentialsBox />
-        ) : balance ? (
-          <>
-            <div className="kpi-grid kpi-grid-4" style={{ marginBottom: 0 }}>
-              <div className="kpi-box">
-                <div className="kpi-label">کل دارایی</div>
-                <div className="kpi-value">{fmtUsd(balance.total)}</div>
-              </div>
-              <div className="kpi-box">
-                <div className="kpi-label">آزاد</div>
-                <div className="kpi-value">{fmtUsd(balance.free)}</div>
-              </div>
-              <div className="kpi-box">
-                <div className="kpi-label">مارجین در معامله</div>
-                <div className="kpi-value">{fmtUsd(balance.positionMargin)}</div>
-              </div>
-              <div className="kpi-box">
-                <div className="kpi-label">سود/زیان باز</div>
-                <div className="kpi-value" style={{ color: pnlColor(balance.unrealizedPnL) }}>
-                  {fmtUsd(balance.unrealizedPnL)}
+      {/* ============ item 14 bottom grid: «موجودی و ریسک» beside «آمار معاملات نمادها» ============ */}
+      <div className="bottom-grid">
+        <PanelCard
+          title="موجودی و ریسک"
+          icon="ph-fill ph-wallet"
+          actions={<RefreshBtn onClick={refreshBalance} busy={balanceBusy} label="به‌روزرسانی موجودی و پوزیشن‌ها" />}
+        >
+          {credentialsMissing ? (
+            <CredentialsBox />
+          ) : balance ? (
+            <>
+              <div className="kpi-grid kpi-grid-4" style={{ marginBottom: 0 }}>
+                <div className="kpi-box">
+                  <div className="kpi-label">کل دارایی</div>
+                  <div className="kpi-value">{fmtUsd(balance.total)}</div>
+                </div>
+                <div className="kpi-box">
+                  <div className="kpi-label">آزاد</div>
+                  <div className="kpi-value">{fmtUsd(balance.free)}</div>
+                </div>
+                <div className="kpi-box">
+                  <div className="kpi-label">مارجین در معامله</div>
+                  <div className="kpi-value">{fmtUsd(balance.positionMargin)}</div>
+                </div>
+                <div className="kpi-box">
+                  <div className="kpi-label">سود/زیان باز</div>
+                  <div className="kpi-value" style={{ color: pnlColor(balance.unrealizedPnL) }}>
+                    {fmtUsd(balance.unrealizedPnL)}
+                  </div>
                 </div>
               </div>
+              <div className="progress-bar" style={{ marginTop: 12 }}>
+                <div
+                  className="progress-fill"
+                  style={{
+                    width: balance.total > 0 ? `${Math.min(100, (balance.positionMargin / balance.total) * 100)}%` : '0%',
+                    background: 'linear-gradient(90deg, var(--warning), var(--danger))',
+                  }}
+                />
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
+                <span>مارجین در معامله</span>
+                <span>
+                  {balance.total > 0 ? (
+                    <span className="num">{fmtNum((balance.positionMargin / balance.total) * 100, 1)}٪</span>
+                  ) : (
+                    UNKNOWN
+                  )}{' '}
+                  از کل
+                </span>
+              </div>
+            </>
+          ) : (
+            <div className="empty-state" style={{ padding: 18 }}>
+              <i className="ph ph-circle-notch spin" aria-hidden />
             </div>
-            <div className="progress-bar" style={{ marginTop: 12 }}>
-              <div
-                className="progress-fill"
-                style={{
-                  width: balance.total > 0 ? `${Math.min(100, (balance.positionMargin / balance.total) * 100)}%` : '0%',
-                  background: 'linear-gradient(90deg, var(--warning), var(--danger))',
-                }}
-              />
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
-              <span>مارجین در معامله</span>
-              <span>
-                {balance.total > 0 ? (
-                  <span className="num">{fmtNum((balance.positionMargin / balance.total) * 100, 1)}٪</span>
-                ) : (
-                  UNKNOWN
-                )}{' '}
-                از کل
-              </span>
-            </div>
-          </>
-        ) : (
-          <div className="empty-state" style={{ padding: 18 }}>
-            <i className="ph ph-circle-notch spin" aria-hidden />
-          </div>
-        )}
-      </PanelCard>
+          )}
+        </PanelCard>
+
+        <PanelCard
+          title="آمار معاملات نمادها"
+          icon="ph-fill ph-chart-bar"
+          actions={<RefreshBtn onClick={onRefreshAll} label="به‌روزرسانی آمار معاملات" />}
+        >
+          <SymbolStatsTable stats={symbolStats} variant="panel" label="آمار معاملات نمادها" />
+          <SymbolStatsCoverageNote stats={symbolStats} />
+        </PanelCard>
+        </div>
 
       {/* ============ close-confirm gate (mission §1.1) ============ */}
       {/* The ONLY trigger of POST /api/positions/close. Escape / backdrop /

@@ -257,7 +257,6 @@ function Shell() {
   }
 
   const meta = VIEW_META[view]
-  const showRun = view === 'automation'
 
   const focusPayload: ChartFocusPayload | null = chartFocus
     ? {
@@ -275,18 +274,15 @@ function Shell() {
       <Sidebar
         active={view}
         onNavigate={setView}
-        username={username}
-        onLogout={handleLogout}
         mobileOpen={mobileNav}
         onCloseMobile={() => setMobileNav(false)}
-        symbolStats={symbolStats}
       />
       <main className="main-content">
         <AppHeader
           title={meta.title}
           subtitle={meta.subtitle}
-          onRunCycle={showRun ? runCycle : undefined}
-          running={running}
+          username={username}
+          onLogout={handleLogout}
           onOpenMobileNav={() => setMobileNav(true)}
         />
         <div key={`${view}-${refreshKey}`} className="view-enter" style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
@@ -309,11 +305,6 @@ function Shell() {
           <span>
             <i className="ph-fill ph-robot" style={{ color: 'var(--accent)' }} aria-hidden /> تریدبات نسخه ۲ — استراتژی Fake
             Breakout · صرافی توبیت
-          </span>
-          <span>
-            <span className="badge badge-info" style={{ fontSize: 10 }}>
-              <span className="badge-dot-sm" /> زمان‌بندی چرخه: کرون ابر (*/۵ دقیقه)
-            </span>
           </span>
         </footer>
       </main>

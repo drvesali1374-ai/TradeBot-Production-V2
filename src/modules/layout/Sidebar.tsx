@@ -1,17 +1,19 @@
 'use client'
 
 /**
- * App sidebar — RTL fixed nav, view switching, mobile drawer, and the
- * per-symbol trade-stats table (mission §8-UI).
- * Active views only (mission §7): automation / chart / settings.
- * The drawer sits ABOVE its backdrop (z-index 110 vs 100) and closes
- * via navigation, outside click (backdrop) or Escape (mission §12).
- * On ≤1024px the sidebar is an off-canvas drawer — the automation view
- * renders the in-page twin of the stats table there (CSS .stats-inpage),
- * while this drawer copy stays available (scrollable) at every width.
+ * App sidebar — RTL fixed nav + view switching + mobile drawer.
+ *
+ * item 6 — COLLAPSIBLE on desktop (≥1025px): a floating round handle on the
+ * sidebar's inner edge toggles an icon-only rail (76px). The collapsed
+ * state persists in localStorage ('tb-sidebar-collapsed') and animates the
+ * main content margin (CSS var --sidebar-width via body.sidebar-collapsed).
+ * item 13 — the user profile/footer was REMOVED (moved to the app header).
+ * item 14 — the per-symbol stats table was REMOVED (moved into the main
+ * dashboard next to «موجودی و ریسک»).
+ * The drawer (≤1024px) is unchanged: off-canvas, closes via navigation,
+ * outside click (backdrop) or Escape (mission §12).
  */
 import { useEffect, useState } from 'react'
-import { SymbolStatsTable, SymbolStatsCoverageNote, type SymbolStatsPayload } from '@/modules/automation/SymbolStatsTable'
 
 export type ViewId = 'automation' | 'chart' | 'settings'
 
@@ -28,19 +30,38 @@ const NAV: NavItem[] = [
   { id: 'settings', label: 'تنظیمات', icon: 'ph-fill ph-gear-six', description: 'استراتژی، صرافی و اعلان‌ها' },
 ]
 
+const SIDEBAR_COLLAPSED_KEY = 'tb-sidebar-collapsed'
+
 interface SidebarProps {
   active: ViewId
   onNavigate: (v: ViewId) => void
-  username: string | null
-  onLogout: () => void
   mobileOpen: boolean
   onCloseMobile: () => void
-  /** Per-symbol closed-trade stats (mission §8-UI) — fetched by the shell. */
-  symbolStats: SymbolStatsPayload | null
 }
 
-export function Sidebar({ active, onNavigate, username, onLogout, mobileOpen, onCloseMobile, symbolStats }: SidebarProps) {
-  const [profileOpen, setProfileOpen] = useState(false)
+export function Sidebar({ active, onNavigate, mobileOpen, onCloseMobile }: SidebarProps) {
+  // item 6 — persisted collapse (desktop rail), read lazily ONCE. This
+  // component only mounts client-side AFTER auth resolves (the shell renders
+  // a spinner while 'checking'), so the localStorage read can never cause a
+  // hydration mismatch. The body class drives the sidebar width AND the
+  // main-content margin (CSS var --sidebar-width).
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false
+    try {
+      return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
+
+  useEffect(() => {
+    document.body.classList.toggle('sidebar-collapsed', collapsed)
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0')
+    } catch {
+      /* ignore */
+    }
+  }, [collapsed])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -59,6 +80,8 @@ export function Sidebar({ active, onNavigate, username, onLogout, mobileOpen, on
     }
   }, [mobileOpen])
 
+  const toggleCollapsed = () => setCollapsed((v) => !v)
+
   return (
     <>
       <div
@@ -69,8 +92,20 @@ export function Sidebar({ active, onNavigate, username, onLogout, mobileOpen, on
       <aside
         className={`sidebar${mobileOpen ? ' mobile-open' : ''}`}
         aria-label="ناوبری اصلی"
-        aria-hidden={undefined}
       >
+        {/* item 6 — collapse handle (hidden ≤1024px via CSS; the mobile
+            sidebar is a drawer that always shows full labels) */}
+        <button
+          type="button"
+          className="sidebar-collapse-handle"
+          onClick={toggleCollapsed}
+          title={collapsed ? 'باز کردن نوار کناری' : 'بستن نوار کناری'}
+          aria-label={collapsed ? 'باز کردن نوار کناری' : 'بستن نوار کناری'}
+          aria-expanded={!collapsed}
+        >
+          <i className={`ph-bold ph-caret-${collapsed ? 'left' : 'right'}`} aria-hidden />
+        </button>
+
         <div className="logo">
           <div className="logo-icon">
             <i className="ph-fill ph-robot" aria-hidden />
@@ -92,6 +127,7 @@ export function Sidebar({ active, onNavigate, username, onLogout, mobileOpen, on
                   onCloseMobile()
                 }}
                 aria-current={active === item.id ? 'page' : undefined}
+                title={collapsed ? item.label : item.description}
               >
                 <i className={item.icon} aria-hidden />
                 <span>{item.label}</span>
@@ -114,42 +150,6 @@ export function Sidebar({ active, onNavigate, username, onLogout, mobileOpen, on
             </div>
           </div>
         </nav>
-
-        {/* §8-UI — per-symbol closed-trade stats. Data arrives from the
-            shell (single fetch shared with the automation view's in-page
-            twin). Server-sorted; empty → «داده‌ای موجود نیست», failure →
-            «خطای دریافت آمار» (never fake zero rows). */}
-        <div className="sidebar-stats">
-          <div className="nav-section-label" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <i className="ph-fill ph-chart-bar" aria-hidden style={{ fontSize: 13 }} />
-            آمار معاملات نمادها
-          </div>
-          <SymbolStatsTable stats={symbolStats} variant="sidebar" label="آمار معاملات نمادها" />
-          <SymbolStatsCoverageNote stats={symbolStats} />
-        </div>
-
-        <div className="sidebar-footer">
-          <div className="user-card" onClick={() => setProfileOpen((v) => !v)}>
-            <div className="user-avatar">{(username ?? '؟').slice(0, 1)}</div>
-            <div className="user-info">
-              <div className="user-name">{username ?? 'کاربر'}</div>
-              <div className="user-plan">
-                <span className="dot" /> مدیر ربات
-              </div>
-            </div>
-            <i className="ph ph-sign-out" style={{ color: 'var(--danger)' }} aria-hidden />
-          </div>
-          {profileOpen ? (
-            <button
-              type="button"
-              className="btn btn-outline btn-sm"
-              style={{ width: '100%', marginTop: 8, justifyContent: 'center' }}
-              onClick={onLogout}
-            >
-              <i className="ph ph-sign-out" aria-hidden /> <span>خروج از حساب</span>
-            </button>
-          ) : null}
-        </div>
       </aside>
     </>
   )

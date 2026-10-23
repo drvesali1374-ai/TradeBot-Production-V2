@@ -3,7 +3,7 @@
  * helpers used by the close dialog / positions table. NO network, NO real
  * orders, NO exchange credentials. Run: bun run tests/close-confirm.test.ts
  */
-import { fmtUsdtAmount, tpslLabel, fmtPrice } from '../src/modules/common/format'
+import { fmtUsdtAmount, tpslLabel, fmtTpsl } from '../src/modules/common/format'
 
 let pass = 0
 let fail = 0
@@ -37,7 +37,7 @@ function assert(cond: boolean, label: string) {
   // ok + value → real price
   const a = tpslLabel(1.1987, 'ok')
   assert(a.kind === 'price', 'ok+value → kind price')
-  assert(a.text === fmtPrice(1.1987), 'ok+value → formatted price text (fmtPrice)')
+  assert(a.text === '1.1987', 'ok+value → full-precision text (fmtTpsl, never 2-decimal rounded)')
 
   // ok + null → genuinely not set
   const b = tpslLabel(null, 'ok')
@@ -54,14 +54,30 @@ function assert(cond: boolean, label: string) {
   // defensive (not in the live contract): status undefined
   const e = tpslLabel(1.465, undefined)
   assert(e.kind === 'price', 'undefined status + value → kind price')
-  assert(e.text === fmtPrice(1.465), 'undefined status + value → price shown')
+  assert(e.text === '1.465', 'undefined status + value → price shown')
   const f = tpslLabel(null, undefined)
   assert(f.kind === 'unknown', 'undefined status + null → kind unknown')
   assert(f.text === 'نامشخص', 'undefined status + null → «نامشخص» (never claims «تنظیم نشده» without read-back)')
 
   // live probe fixture values (XRP-SHORT TP/SL) map cleanly
   const xrp = tpslLabel(1.1987, 'ok')
-  assert(xrp.text === '1.2', 'XRP TP 1.1987 renders through fmtPrice (2-decimal display)')
+  assert(xrp.text === '1.1987', 'XRP TP 1.1987 keeps its raw precision (item 8)')
+}
+
+/* ---------------- fmtTpsl (item 8 — trailing zeros trimmed) ---------------- */
+
+{
+  assert(fmtTpsl(0.1023) === '0.1023', '0.1023000 → 0.1023 (trailing zeros trimmed, never 0.10)')
+  assert(fmtTpsl(12.01032) === '12.01032', '12.0103200 → 12.01032')
+  assert(fmtTpsl(1.2) === '1.2', '1.2 → 1.2 (no padded decimals)')
+  assert(fmtTpsl(1.1987) === '1.1987', '1.1987 → 1.1987 (4 decimals survive)')
+  assert(fmtTpsl(0.13) === '0.13', '0.13 → 0.13')
+  assert(fmtTpsl(1023) === '1,023', 'whole numbers get separators, no decimal part')
+  assert(fmtTpsl(0.123456789123) === '0.12345679', 'beyond 8 decimals → rounded at 8, not truncated')
+  assert(fmtTpsl(null) === '—', 'null → —')
+  assert(fmtTpsl(undefined) === '—', 'undefined → —')
+  assert(fmtTpsl(Number.NaN) === '—', 'NaN → —')
+  assert(fmtTpsl(-0.5) === '-0.5', 'negative keeps the sign')
 }
 
 console.log(`close-confirm: ${pass} passed, ${fail} failed`)

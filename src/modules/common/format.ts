@@ -71,6 +71,20 @@ export interface TpslLabel {
 }
 
 /**
+ * Precision-preserving TP/SL price (item 8 — trailing zeros trimmed):
+ * up to 8 significant decimals, NO minimum fraction digits, so Toobit's
+ * raw precision survives without trailing-zero noise:
+ *   0.1023     → `0.1023`   (never `0.10`)
+ *   12.01032   → `12.01032`
+ *   1.2        → `1.2`
+ * null/undefined/NaN → `'—'`.
+ */
+export function fmtTpsl(n: number | null | undefined): string {
+  if (n == null || Number.isNaN(n)) return '—'
+  return n.toLocaleString('en-US', { maximumFractionDigits: 8, minimumFractionDigits: 0 })
+}
+
+/**
  * Tri-state TP/SL label (mission §2.2). The caller colors by `kind`:
  * price → long/short hue, unset → muted, unknown → warning-ish muted.
  *
@@ -83,7 +97,7 @@ export interface TpslLabel {
  */
 export function tpslLabel(value: number | null | undefined, status?: 'ok' | 'unknown' | null): TpslLabel {
   if (status === 'unknown') return { text: 'نامشخص', kind: 'unknown' }
-  if (value != null && !Number.isNaN(value)) return { text: fmtPrice(value), kind: 'price' }
+  if (value != null && !Number.isNaN(value)) return { text: fmtTpsl(value), kind: 'price' }
   if (status === 'ok') return { text: 'تنظیم نشده', kind: 'unset' }
   return { text: 'نامشخص', kind: 'unknown' }
 }

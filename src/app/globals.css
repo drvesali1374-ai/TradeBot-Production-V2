@@ -58,6 +58,8 @@
   --shadow-xl: 0 28px 64px -16px rgba(15, 23, 42, 0.18);
   --glow: 0 0 0 4px var(--accent-glow);
   --sidebar-width: 320px;
+  /* item 6 — collapsible sidebar (icon-only rail) on desktop */
+  --sidebar-width-collapsed: 76px;
 
   /* shadcn compat (light) */
   --background: var(--bg-body);
@@ -285,33 +287,9 @@ a { color: inherit; text-decoration: none; }
   margin-right: auto;
 }
 
-.sidebar-footer {
-  border-top: 1px solid var(--border-color);
-  padding-top: 14px;
-  margin-top: 10px;
-}
-
-/* §8-UI — per-symbol trade-stats section inside the sidebar/drawer.
-   The inner DataTable brings its own scrollport (max-height 300) with a
-   sticky thead, so this block only frames it; the flex nav above shrinks
-   on short viewports (it has overflow-y:auto → automatic min-height 0). */
-.sidebar-stats {
-  border-top: 1px solid var(--border-color);
-  margin-top: 6px;
-  padding: 8px 2px 4px;
-  flex-shrink: 0;
-}
-.sidebar-stats .nav-section-label { padding: 6px 10px 8px; }
-.user-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: var(--transition);
-}
-.user-card:hover { background: var(--bg-hover); }
+/* item 13 — the user profile moved from the sidebar footer into the
+   top header (leftmost slot). The sidebar footer/stats sections were
+   removed (items 13+14); these styles now serve the header chip only. */
 .user-avatar {
   width: 38px; height: 38px;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
@@ -325,7 +303,6 @@ a { color: inherit; text-decoration: none; }
   flex-shrink: 0;
   box-shadow: 0 4px 12px -2px rgba(99, 102, 241, 0.4);
 }
-.user-info { flex: 1; min-width: 0; }
 .user-name {
   font-weight: 600;
   font-size: 13px;
@@ -333,20 +310,114 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.user-plan {
-  font-size: 11px;
-  color: var(--text-muted);
-  display: flex;
+
+/* header user chip + dropdown menu (item 13) */
+.header-user { position: relative; }
+.user-chip {
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
+  padding: 4px 10px 4px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-card);
+  transition: var(--transition);
+  min-height: 40px;
 }
-.user-plan .dot {
+.user-chip:hover { background: var(--bg-hover); border-color: var(--border-color); }
+.user-chip .user-avatar { width: 30px; height: 30px; border-radius: 9px; font-size: 12.5px; }
+.user-chip-name {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  max-width: 130px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.user-chip > i { color: var(--text-muted); font-size: 13px; transition: transform 0.2s ease; }
+.user-chip[aria-expanded='true'] > i { transform: rotate(180deg); }
+.user-menu {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 0;
+  min-width: 190px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  padding: 6px;
+  z-index: 90;
+  direction: rtl;
+}
+.user-menu-head { padding: 8px 10px 10px; border-bottom: 1px solid var(--border-soft); margin-bottom: 6px; }
+.user-menu-head .user-name { font-size: 13px; }
+.user-role { font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 4px; margin-top: 2px; }
+.user-role .dot {
   width: 6px; height: 6px;
   background: var(--success);
   border-radius: 50%;
   display: inline-block;
 }
-.user-card > i { color: var(--text-muted); font-size: 16px; }
+.user-menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  transition: var(--transition);
+  text-align: right;
+}
+.user-menu-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.user-menu-item.danger { color: var(--danger); }
+.user-menu-item.danger:hover { background: var(--danger-soft); }
+.user-menu-item i { font-size: 15px; flex-shrink: 0; }
+@media (max-width: 640px) {
+  .user-chip-name { display: none; }
+  .user-chip { padding: 4px; }
+}
+
+/* item 6 — sidebar collapse handle (desktop only; the ≤1024px sidebar is
+   an off-canvas drawer where the handle stays hidden). */
+.sidebar-collapse-handle {
+  position: absolute;
+  left: -14px;
+  top: 96px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 14px;
+  z-index: 5;
+  transition: var(--transition);
+}
+.sidebar-collapse-handle:hover { color: var(--accent); border-color: var(--accent); }
+@media (max-width: 1024px) {
+  .sidebar-collapse-handle { display: none; }
+}
+@media (min-width: 1025px) {
+  /* the var override drives BOTH the sidebar width and .main-content's
+     margin-right (which reads --sidebar-width) → one animated transition */
+  body.sidebar-collapsed { --sidebar-width: var(--sidebar-width-collapsed); }
+  body.sidebar-collapsed .sidebar { width: var(--sidebar-width-collapsed); padding: 20px 8px; }
+  body.sidebar-collapsed .sidebar .logo { justify-content: center; padding: 6px 0 22px; }
+  body.sidebar-collapsed .sidebar .logo-text,
+  body.sidebar-collapsed .sidebar .nav-section-label,
+  body.sidebar-collapsed .sidebar .nav-link span,
+  body.sidebar-collapsed .sidebar .nav-badge { display: none; }
+  body.sidebar-collapsed .sidebar .nav-link { justify-content: center; padding: 12px 0; }
+  body.sidebar-collapsed .sidebar .nav-menu { gap: 4px; }
+}
 
 /* ---------------- layout: main + header ---------------- */
 
@@ -638,13 +709,22 @@ a { color: inherit; text-decoration: none; }
   margin-bottom: 18px;
 }
 
-/* §8-UI — in-page twin of the sidebar stats table. The sidebar is
-   off-canvas at ≤1024px (drawer), so exactly below that width the
-   automation main column carries the stats panel instead; at ≥1025px
-   the SIDEBAR carries it — never both. */
-@media (min-width: 1025px) {
-  .stats-inpage { display: none; }
+/* item 12/14 — bottom grid of the automation view: «موجودی و ریسک» beside
+   «آمار معاملات نمودها» (two columns on wide screens, stacked below 1100px).
+   The balance KPI row folds to 2×2 inside the narrower column. */
+.bottom-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
 }
+@media (min-width: 1100px) {
+  .bottom-grid { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
+}
+.bottom-grid .kpi-grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+/* §8-UI — the stats panel now lives IN the main dashboard next to the
+   balance panel (item 14); the old sidebar twin was removed. */
 
 .table-card { padding: 0; overflow: hidden; }
 .table-header {
@@ -720,45 +800,201 @@ table.tb-table {
    a thin accent bar on the row's leading (RIGHT in RTL) edge only. */
 .tb-table tbody tr.tb-row-current > td:first-child { box-shadow: inset -3px 0 0 0 var(--accent); }
 
-/* expanded technical-details row (log table, mission §5) */
+/* expanded technical-details row (log table, mission §5 + item 2 redesign) */
 .tb-details-row > td {
   background: var(--bg-hover);
   border-bottom: 1px solid var(--border-soft);
   padding: 12px 16px 16px;
 }
-.log-detail-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 10px;
+
+/* item 2 — organized expanded-view primitives: header line, meta chips,
+   sections with translated labels and typed values (dates → Jalali bold,
+   booleans → ✓/✗ chips, risk controls → pass/fail chips, JSON → mono block). */
+.log-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
   margin-bottom: 10px;
 }
-.log-detail-item { min-width: 0; }
-.log-detail-label {
+.log-detail-head .log-head-title {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+.log-detail-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.log-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-soft);
+  white-space: nowrap;
+}
+.log-chip i { font-size: 12px; color: var(--text-muted); }
+.log-chip b { color: var(--text-primary); font-weight: 700; }
+.log-detail-section { margin-top: 12px; }
+.log-detail-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.log-detail-section-title i { font-size: 13px; }
+.log-kv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+}
+.log-kv-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 8px 10px;
+  min-width: 0;
+}
+.log-kv-box-label {
   font-size: 10.5px;
   color: var(--text-muted);
   margin-bottom: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.log-detail-value { font-size: 12.5px; direction: ltr; unicode-bidi: isolate; }
-.log-detail-kv {
-  margin-top: 10px;
+.log-kv-box-val {
+  font-size: 12px;
+  color: var(--text-primary);
+  font-weight: 700;
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: left;
+  word-break: break-word;
+}
+.log-kv-box-val.rtl-val { direction: rtl; text-align: right; }
+.log-bool {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 7px;
+}
+.log-bool.yes { color: var(--success); background: var(--success-soft); }
+.log-bool.no { color: var(--danger); background: var(--danger-soft); }
+.log-ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 7px;
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius-xs);
-  padding: 10px 12px;
   background: var(--bg-card);
-  max-height: 240px;
-  overflow-y: auto;
 }
-.log-detail-kv-row {
+.log-ctl.pass { color: var(--success); border-color: color-mix(in srgb, var(--success) 35%, transparent); }
+.log-ctl.fail { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+.log-json {
+  direction: ltr;
+  text-align: left;
+  font-size: 10.5px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+/* item 1 — close-confirm dialog (redesigned): symbol banner, info grid,
+   PnL highlight strip. */
+.ccd-symbol-banner {
   display: flex;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 4px 0;
-  border-bottom: 1px dashed var(--border-soft);
-  font-size: 11.5px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
 }
-.log-detail-kv-row:last-child { border-bottom: none; }
-.log-detail-kv-key { color: var(--text-muted); white-space: nowrap; }
-.log-detail-kv-val { direction: ltr; unicode-bidi: isolate; text-align: left; word-break: break-all; }
+.ccd-symbol-icon {
+  width: 34px; height: 34px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 17px;
+  flex-shrink: 0;
+}
+.ccd-symbol-name {
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: 0.2px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ccd-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.ccd-cell {
+  background: var(--bg-hover);
+  border-radius: 10px;
+  padding: 8px 10px;
+  min-width: 0;
+}
+.ccd-cell-label { font-size: 10.5px; color: var(--text-muted); margin-bottom: 2px; }
+.ccd-cell-val {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: left;
+  word-break: break-word;
+}
+.ccd-pnl {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-hover);
+}
+
+/* item 3 — bold, high-contrast datetime cells in every table (light theme:
+   near-black, dark theme: near-white via --text-primary). */
+.cell-dt {
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
 
 /* log table toolbar (mission §6) */
 .log-toolbar {
@@ -1352,18 +1588,6 @@ input[type='checkbox'] { accent-color: var(--accent); width: 16px; height: 16px;
 
 .section-gap { margin-bottom: 22px; }
 
-.sched-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 20px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 11px;
-  font-weight: 700;
-}
-
 .empty-state {
   text-align: center;
   padding: 34px 16px;
@@ -1479,3 +1703,5 @@ body.nav-drawer-open { overflow: hidden; }
     transition-duration: 0.01ms !important;
   }
 }
+
+/* m4 css refresh */
