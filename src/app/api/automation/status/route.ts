@@ -2,6 +2,7 @@
 import { json, requireAuth, isResponse } from '../../_lib'
 import { getStorage, STORAGE_KEYS } from '@/server/storage'
 import { loadAutomationSettings } from '@/server/configuration/settings-service'
+import { DEFAULT_SYMBOLS } from '@/core/symbols'
 import type { CycleResult, SymbolEntry } from '@/core/types'
 
 export async function GET(req: Request) {
@@ -18,7 +19,10 @@ export async function GET(req: Request) {
   return json({
     success: true,
     lastResult,
-    symbols: symbols ?? [],
+    // Same shared DEFAULT_SYMBOLS the symbols route + cycle engine fall back
+    // to — a fresh deployment (no symbols key in storage) must NOT show an
+    // empty table while the engine would trade DOT/BTC/ETH (item 9).
+    symbols: symbols ?? DEFAULT_SYMBOLS,
     lock: lock && (lock as { expiresAt: number }).expiresAt > Date.now() ? lock : null,
     tradeWaitTime: settings.tradeWaitTime,
     storage: budget,

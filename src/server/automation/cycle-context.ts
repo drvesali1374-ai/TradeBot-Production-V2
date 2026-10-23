@@ -10,7 +10,18 @@ import { STORAGE_KEYS } from '@/server/storage'
 
 export class CycleContext {
   readonly startedAt: number
-  readonly cycleId: string
+  /**
+   * Public cycle id ({SYMBOL}_{YYYYMMDD}_{HHMMSS}, Jalali/Tehran — see
+   * cycle-id.ts). Starts as the engine's internal id and is re-keyed
+   * via rekey() once the symbol is known (or to CYCLE_… for early
+   * exits before selection). The engine keeps the internal id
+   * separately for the concurrency lock, which must stay stable for
+   * the whole run.
+   */
+  private _cycleId: string
+  get cycleId(): string {
+    return this._cycleId
+  }
   settings!: AutomationSettings
   account!: AccountSettings
 
@@ -26,8 +37,20 @@ export class CycleContext {
   private stepStartedAt = 0
 
   constructor(cycleId: string, private batcher: WriteBatcher) {
-    this.cycleId = cycleId
+    this._cycleId = cycleId
     this.startedAt = Date.now()
+  }
+
+  /**
+   * Re-key the cycle once the symbol is known. Cycle ids include the
+   * symbol per the owner's format ({SYMBOL}_{YYYYMMDD}_{HHMMSS}), but
+   * the symbol is only selected several steps into the run — so the
+   * context starts with the engine's internal id and is re-keyed here.
+   * Safe to call at most once per run (later steps/log records and the
+   * returned CycleResult all read `cycleId` AFTER the re-key).
+   */
+  rekey(cycleId: string): void {
+    this._cycleId = cycleId
   }
 
   /** Load & track a value once — later staged writes diff against it. */

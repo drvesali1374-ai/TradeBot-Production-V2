@@ -1,6 +1,7 @@
 export * from './types'
 export * from './settings'
 export * from './indicators'
+export { DEFAULT_SYMBOLS, cloneDefaultSymbols } from './symbols'
 export { TEHRAN_OFFSET_MS, tehranDayKey, tehranDayStart } from './time/tehran-day'
 export { isCandleClosed, splitClosedCandles, intervalToMs } from './time/candles'
 export { computeDailyLevels } from './strategy/daily-levels'

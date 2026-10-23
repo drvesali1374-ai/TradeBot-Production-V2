@@ -22,6 +22,7 @@ import {
   intervalToMs,
   splitClosedCandles,
   STRATEGY_VERSION,
+  cloneDefaultSymbols,
 } from '@/core'
 import { fullSymbol } from '@/server/exchanges/toobit/endpoints'
 import type { CycleResult, CycleAction, SymbolEntry, LogRecord, StepLog, LogStatus } from '@/core/types'
@@ -32,6 +33,7 @@ import { loadAutomationSettings, loadAccountSettings } from '@/server/configurat
 import { sendBale } from '@/server/notifications/bale'
 import { tryAcquireLock, releaseLock } from './cycle-lock'
 import { CycleContext } from './cycle-context'
+import { makeCycleId } from './cycle-id'
 
 export interface RunCycleOptions {
   source: 'manual' | 'cron'
@@ -39,7 +41,13 @@ export interface RunCycleOptions {
   symbolOverride?: string
 }
 
-function makeCycleId(): string {
+/**
+ * INTERNAL lock/run id — unique and stable for the whole run. Used for
+ * tryAcquireLock/releaseLock only; the PUBLIC cycle id (result, logs,
+ * UI) is the owner-format {SYMBOL}_{YYYYMMDD}_{HHMMSS} id re-keyed onto
+ * the context via makeCycleId() once the symbol is known.
+ */
+function makeLockId(): string {
   return `c_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
 }
 
@@ -48,18 +56,20 @@ function fa(n: number, digits = 2): string {
 }
 
 export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
-  const cycleId = makeCycleId()
+  const lockId = makeLockId()
   const store = getStorage()
   const storage = store
   storage.resetCycleBudget()
 
   const batcher = new WriteBatcher(store)
-  const ctx = new CycleContext(cycleId, batcher)
+  const ctx = new CycleContext(lockId, batcher)
   const startedAt = Date.now()
 
   const finish = (action: CycleAction, extra: Partial<CycleResult> = {}): CycleResult => {
     const result: CycleResult = {
-      cycleId,
+      // ctx.cycleId — the possibly re-keyed public id ({SYMBOL}_… or CYCLE_…),
+      // NOT the captured internal lock id
+      cycleId: ctx.cycleId,
       symbol: ctx.selectedSymbol?.name ?? options.symbolOverride ?? null,
       startedAt,
       finishedAt: Date.now(),
@@ -85,13 +95,9 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
     const symbols = (await ctx.track<SymbolEntry[]>(STORAGE_KEYS.symbols, () =>
       store.get<SymbolEntry[]>(STORAGE_KEYS.symbols)
     )) ?? []
-    ctx.symbols = symbols.length
-      ? symbols
-      : [
-          { id: 1, name: 'DOT', status: 'waiting', errorCount: 0, lastCycleTime: null },
-          { id: 2, name: 'BTC', status: 'waiting', errorCount: 0, lastCycleTime: null },
-          { id: 3, name: 'ETH', status: 'waiting', errorCount: 0, lastCycleTime: null },
-        ]
+    // Fallback = the SAME shared DEFAULT_SYMBOLS the symbols/status routes
+    // serve (fresh clone — the engine mutates entries in place)
+    ctx.symbols = symbols.length ? symbols : cloneDefaultSymbols()
     const client = new ToobitClient({ apiKey: ctx.account.apiKey, secretKey: ctx.account.secretKey })
     ctx.step('بارگذاری تنظیمات', 'ok', `تنظیمات و ${ctx.symbols.length} نماد بارگذاری شد`, {
       settingsVersion: STRATEGY_VERSION,
@@ -105,11 +111,13 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
 
     /* ---- Step 3: lock ---- */
     ctx.beginStep()
-    const lock = await tryAcquireLock(options.source, cycleId)
+    const lock = await tryAcquireLock(options.source, lockId)
     if (!lock.acquired) {
       ctx.step('قفل اجرا', 'warning', 'چرخه دیگری در حال اجراست — اجرای هم‌زمان رد شد', {
         heldBy: lock.heldBy?.cycleId,
       })
+      // exited BEFORE symbol selection → CYCLE_-prefixed public id
+      ctx.rekey(makeCycleId(null, startedAt))
       return finish('ERROR', { error: 'چرخه موازی در حال اجراست' })
     }
     ctx.step('قفل اجرا', 'ok', 'قفل اجرا فعال شد')
@@ -138,10 +146,15 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
       }
       if (idx < 0) {
         ctx.step('انتخاب نماد', 'skipped', 'نماد آماده‌ای برای چرخه وجود ندارد (زمان انتظار)')
+        // exited BEFORE symbol selection (and before markCycleStart) → CYCLE_-prefixed id
+        ctx.rekey(makeCycleId(null, startedAt))
         return finish('NO_READY_SYMBOL')
       }
       ctx.symbolIndex = idx
       const symbol = ctx.symbols[idx].name
+      // Symbol now known → public id becomes {SYMBOL}_{YYYYMMDD}_{HHMMSS}
+      // (Jalali/Tehran, keyed to the cycle's start instant)
+      ctx.rekey(makeCycleId(symbol, startedAt))
       ctx.markCycleStart()
       ctx.step('انتخاب نماد', 'ok', `نماد ${symbol} انتخاب شد`, { symbol, tradeWaitTime: ctx.settings.tradeWaitTime })
 
@@ -406,10 +419,15 @@ export async function runCycle(options: RunCycleOptions): Promise<CycleResult> {
         },
       })
     } finally {
-      await releaseLock(cycleId)
+      await releaseLock(lockId)
     }
   } catch (e) {
-    // Error path: symbol error accounting + rejection of parallel write
+    // Error path: symbol error accounting + rejection of parallel write.
+    // If the cycle died BEFORE symbol selection the public id is still the
+    // internal one → re-key consistently ({SYMBOL-OVERRIDE-or-CYCLE}_…).
+    if (ctx.symbolIndex < 0) {
+      ctx.rekey(makeCycleId(options.symbolOverride ?? null, startedAt))
+    }
     const message = e instanceof Error ? e.message : 'خطای ناشناخته'
     const { skipped } = ctx.markError(ctx.settings?.allowedErrors ?? 3)
     ctx.step('خطای چرخه', 'failed', message, { symbol: ctx.selectedSymbol?.name ?? null })

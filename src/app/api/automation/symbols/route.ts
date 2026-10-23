@@ -1,16 +1,13 @@
 /** Symbol management — add / remove / reorder / clear-errors. Auth required. */
 import { json, jsonError, readJsonBody, requireAuth, isResponse } from '../../_lib'
 import { getStorage, STORAGE_KEYS } from '@/server/storage'
+import { cloneDefaultSymbols } from '@/core/symbols'
 import type { SymbolEntry } from '@/core/types'
 
-const DEFAULTS: SymbolEntry[] = [
-  { id: 1, name: 'DOT', status: 'waiting', errorCount: 0, lastCycleTime: null },
-  { id: 2, name: 'BTC', status: 'waiting', errorCount: 0, lastCycleTime: null },
-  { id: 3, name: 'ETH', status: 'waiting', errorCount: 0, lastCycleTime: null },
-]
-
 async function loadSymbols(): Promise<SymbolEntry[]> {
-  const symbols = (await getStorage().get<SymbolEntry[]>(STORAGE_KEYS.symbols)) ?? DEFAULTS
+  // Shared DEFAULT_SYMBOLS (same constant the status route + engine use) —
+  // cloned because POST mutates the array/entries below.
+  const symbols = (await getStorage().get<SymbolEntry[]>(STORAGE_KEYS.symbols)) ?? cloneDefaultSymbols()
   return symbols
 }
 
