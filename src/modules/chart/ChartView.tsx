@@ -30,7 +30,7 @@ import type {
   UTCTimestamp,
 } from 'lightweight-charts'
 import { apiGet } from '@/modules/common/api'
-import { fmtNum, fmtPrice } from '@/modules/common/format'
+import { fmtDateTime, fmtNum, fmtPrice } from '@/modules/common/format'
 import { useToast } from '@/modules/common/toast'
 import { ChartToolbar } from './ChartToolbar'
 import {
@@ -200,6 +200,12 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
   // §7 — the consumed focus (chart centered + marker drawn). Null while no
   // focus is active or when the focus bar could not be found in the data.
   const [focusInfo, setFocusInfo] = useState<FocusInfo | null>(null)
+  // m4 (item 4) — panel-driven focus: clicking a row in the in-chart
+  // «سیگنال‌های اخیر» list centers the chart on that signal WITHOUT a page
+  // remount (unlike the §7 shell flow the component stays mounted, so the
+  // payload lives here and the data-load effect is re-triggered via
+  // reloadKey / the interval state change).
+  const [localFocus, setLocalFocus] = useState<ChartFocusPayload | null>(null)
 
   /* ——— refs (imperative chart world) ——— */
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -632,8 +638,22 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
   /* refs are already up to date in the same commit (effect order).     */
   /* ---------------------------------------------------------------- */
 
+  // m4 — a FRESH page-level focus (§7 shell navigation) always wins over a
+  // panel-driven local focus. The page shell rebuilds its focus payload
+  // object on EVERY render (new identity), so compare by VALUE key
+  // (signalTime+id+side): identity churn (e.g. a toast re-rendering the
+  // shell) must NOT wipe an active local focus.
+  const focusPropKey = focus ? `${focus.signalTime}:${focus.signalId ?? ''}:${focus.side ?? ''}` : null
+  const prevFocusPropKeyRef = useRef<string | null>(focusPropKey)
   useEffect(() => {
-    focusRef.current = focus ?? null
+    if (focusPropKey && focusPropKey !== prevFocusPropKeyRef.current) setLocalFocus(null)
+    prevFocusPropKeyRef.current = focusPropKey
+  }, [focusPropKey])
+
+  useEffect(() => {
+    // m4 — a panel-clicked LOCAL focus shadows the prop focus (the prop
+    // focus cleared the local one in the effect above when it arrived).
+    focusRef.current = localFocus ?? focus ?? null
     if (!focusRef.current) {
       // focus dropped (manual symbol/interval change or back-to-now):
       // immediately remove the focus visuals — marker/price lines/badge.
@@ -643,7 +663,7 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
       refreshMarkers()
       refreshPriceLines()
     }
-  }, [focus, refreshMarkers, refreshPriceLines])
+  }, [focus, localFocus, refreshMarkers, refreshPriceLines])
 
   /* ---------------------------------------------------------------- */
   /* Data loading (klines → analysis → markers/price-lines → redraw)  */
@@ -1139,14 +1159,30 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
     setSymbol(s)
     // §7 — notify the page ONLY on a real manual change (not re-clicks of
     // the active chip) so it can drop the focus + strip the URL params.
-    if (changed) onSymbolChangeRef.current?.(s)
+    // m4 — a manual symbol change also drops a PANEL-driven focus (the
+    // panel's signals belong to the previous symbol).
+    if (changed) {
+      setLocalFocus(null)
+      onSymbolChangeRef.current?.(s)
+    }
   }, [])
 
-  const handleIntervalChange = useCallback((i: string) => {
+  /**
+   * m4 — a MANUAL interval change drops a panel-driven local focus (same
+   * §7 rule as the page-level focus). `keepLocalFocus` is passed ONLY by
+   * focusSignal: its interval switch is PART of establishing a new local
+   * focus, so the drop must be skipped there. An explicit flag instead of
+   * relying on setLocalFocus(null)-then-setLocalFocus(payload) call order
+   * inside one batched event handler — order-independent, provably correct.
+   */
+  const handleIntervalChange = useCallback((i: string, opts?: { keepLocalFocus?: boolean }) => {
     const changed = i !== intervalRef.current
     intervalRef.current = i
     setInterval(i)
-    if (changed) onIntervalChangeRef.current?.(i) // §7 — drops the page focus
+    if (changed) {
+      if (!opts?.keepLocalFocus) setLocalFocus(null)
+      onIntervalChangeRef.current?.(i) // §7 — drops the page focus
+    }
   }, [])
 
   /** §7.2 — «بازگشت به اکنون»: clear all focus visuals, drop the page-level
@@ -1156,11 +1192,50 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
     focusActiveRef.current = false
     focusBarSecRef.current = null
     setFocusInfo(null)
+    setLocalFocus(null) // m4 — panel-driven focus drops too (prop drop via onFocusDrop below)
     refreshMarkers()
     refreshPriceLines()
     onFocusDropRef.current?.()
     setReloadKey((k) => k + 1)
   }, [refreshMarkers, refreshPriceLines])
+
+  /**
+   * m4 (item 4) — click a row in the «سیگنال‌های اخیر» panel → focus the
+   * chart on that signal's candle through the SAME §7 centering pipeline
+   * (the data-load effect resolves focusRef → applyKlines centers + marker
+   * + Entry/TP/SL price lines + focus badge). The signal candle is aligned
+   * to the ANALYSIS interval — when the chart shows a different interval,
+   * switch first: the interval state change re-runs the data-load effect and
+   * the focus-mirror effect (declared BEFORE it) has already written the
+   * payload into focusRef in the same commit. Same-interval clicks bump
+   * reloadKey instead (the component stays mounted — no remount, unlike the
+   * shell-driven navigation).
+   */
+  const focusSignal = useCallback(
+    (s: Signal) => {
+      const signalTime = Number(s.candleOpenTime)
+      if (!Number.isFinite(signalTime) || signalTime <= 0) return // no candle time → no focus
+      const targetInterval =
+        signalState?.analysisInterval && (INTERVALS as readonly string[]).includes(signalState.analysisInterval)
+          ? signalState.analysisInterval
+          : interval
+      const intervalChanged = targetInterval !== interval
+      if (intervalChanged) {
+        handleIntervalChange(targetInterval, { keepLocalFocus: true })
+        show('بازه چارت', `برای نمایش دقیق سیگنال، بازه چارت به ${targetInterval} تغییر کرد`, 'info')
+      }
+      setLocalFocus({
+        signalTime,
+        ...(s.side === 'Long' || s.side === 'Short' ? { side: s.side } : {}),
+        ...(Number.isFinite(s.price) ? { price: s.price } : {}),
+        ...(Number.isFinite(s.tp) ? { tp: s.tp } : {}),
+        ...(Number.isFinite(s.sl) ? { sl: s.sl } : {}),
+        signalId: s.id,
+      })
+      if (!intervalChanged) setReloadKey((k) => k + 1)
+    },
+    [signalState, interval, handleIntervalChange, show],
+  )
 
   const handleToolChange = useCallback((t: DrawingToolId) => {
     draftRef.current = null
@@ -1249,6 +1324,20 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0 }}>
+      {/* m4 (item 4) — signals-panel row states. globals.css is owned by other
+          workstreams, so these rules ship scoped to a unique class via a
+          React-hoisted <style> (deduped by href): hover background var(--bg-hover),
+          disabled dimming while loading, and the dashed warning highlight for
+          the pending-signal row. Backgrounds live HERE (not inline) so the
+          :hover rule is not shadowed by inline styles. */}
+      <style href="tb-sig-row" precedence="medium">
+        {`.tb-sig-row{background:transparent;border:1px solid transparent;cursor:pointer;transition:background .12s ease}
+.tb-sig-row:hover:not(:disabled){background:var(--bg-hover)}
+.tb-sig-row:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.tb-sig-row:disabled{opacity:.55;cursor:default}
+.tb-sig-row[data-pending='true']{border-style:dashed;border-color:var(--warning);background:color-mix(in srgb,var(--warning-soft) 45%,transparent)}
+.tb-sig-row[data-pending='true']:hover:not(:disabled){background:color-mix(in srgb,var(--warning-soft) 75%,transparent)}`}
+      </style>
       <ChartToolbar
         symbol={symbol}
         onSymbolChange={handleSymbolChange}
@@ -1353,15 +1442,18 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
           ) : null}
         </div>
 
-        {/* signal legend panel — auto-sizes to its content (never clips) */}
+        {/* signal legend panel — auto-sizes to its content (never clips).
+            m4 (item 4): every row is a BUTTON — clicking it focuses the chart
+            on that signal's candle (§7 pipeline). data-chart-ui keeps the
+            drawing hit-test away from the list. */}
         {showSignals && signalState && signalState.signals.length > 0 ? (
           <div
+            data-chart-ui
             style={{
               position: 'absolute',
               bottom: 46,
               left: 12,
               zIndex: 3,
-              pointerEvents: 'none',
               direction: 'rtl',
               width: 'max-content',
               minWidth: 210,
@@ -1400,14 +1492,44 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5, maxHeight: 168, overflowY: 'auto' }}>
               {signalState.signals
-                .slice(-6)
+                .slice() // m4 — ALL signals (was slice(-6)), newest first
                 .reverse()
                 .map((s) => {
                   const isLong = s.side === 'Long'
                   const isPending = signalState.pending?.id === s.id
                   const st = s.status ? SIGNAL_STATUS_META[s.status] : null
+                  // m4 — compact Jalali chip: full «YYYY/MM/DD, HH:mm:ss»
+                  // lives in the row title; the chip shows date · HH:mm.
+                  const dtFull = fmtDateTime(s.signalConfirmedAt)
+                  const [dtDate, dtTime] = dtFull.split(', ')
+                  const dtChip = dtDate && dtTime ? `${dtDate} · ${dtTime.slice(0, 5)}` : dtFull
                   return (
-                    <div key={s.id} style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, rowGap: 2, justifyContent: 'space-between' }}>
+                    <button
+                      key={s.id}
+                      type="button"
+                      className="tb-sig-row"
+                      data-pending={isPending ? 'true' : undefined}
+                      disabled={loading}
+                      onClick={() => focusSignal(s)}
+                      title={`نمایش سیگنال ${isLong ? 'لانگ' : 'شورت'} ${symbol} در چارت — ${dtFull}`}
+                      aria-label={`نمایش سیگنال ${isLong ? 'لانگ' : 'شورت'} ${symbol} در ساعت ${dtTime ?? dtFull}`}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        flexWrap: 'wrap',
+                        gap: 6,
+                        rowGap: 2,
+                        justifyContent: 'space-between',
+                        width: '100%',
+                        textAlign: 'start',
+                        padding: '4px 6px',
+                        borderRadius: 6,
+                        fontFamily: 'inherit',
+                        fontSize: 'inherit',
+                        color: 'inherit',
+                        lineHeight: 1.6,
+                      }}
+                    >
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
                         <i
                           className={`ph ${isLong ? 'ph-trend-up' : 'ph-trend-down'}`}
@@ -1425,14 +1547,24 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
                       <span className="num" style={{ fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
                         TP {fmtNum(s.tp, 1)} / SL {fmtNum(s.sl, 1)}
                       </span>
+                      <span
+                        className="num"
+                        title={dtFull}
+                        style={{ fontSize: 9.5, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}
+                      >
+                        {dtChip}
+                      </span>
                       {st ? (
                         <span className={`badge ${st.cls}`} style={{ fontSize: 9.5, padding: '2px 7px', flexShrink: 0 }}>
                           {st.label}
                         </span>
                       ) : null}
-                    </div>
+                    </button>
                   )
                 })}
+            </div>
+            <div style={{ fontSize: 9.5, color: 'var(--text-muted)', marginTop: 6 }}>
+              برای پرش به سیگنال، روی ردیف کلیک کنید
             </div>
           </div>
         ) : null}

@@ -1876,3 +1876,23 @@ Stage Summary:
 - Item 5 done: public cycle ids are `{SYMBOL}_{JALALI YYYYMMDD}_{HHMMSS}` (Tehran, ASCII) with `CYCLE_` prefix for pre-selection exits; the concurrency lock keeps a stable internal `c_…` id for the whole run; proven end-to-end through real runCycle() calls on an isolated temp store (all 4 rekey paths exercised).
 - Item 9 done: ONE shared DEFAULT_SYMBOLS (src/core/symbols.ts) now feeds the symbols route, status route AND cycle engine — fresh deployments show and trade the same DOT/BTC/ETH; live status endpoint verified returning the three defaults.
 - Item 11 done: auth-credential vs account-API-key storage isolation locked by regression tests (20 checks) — login can never overwrite API keys and vice versa; reported bug not reproducible in current code.
+---
+Task ID: m4-chart
+Agent: chart-signals
+Task: Chart page signals box («سیگنال‌های اخیر») fully interactive — every signal clickable → jump-to-signal focus (owner item 4)
+
+Work Log:
+- Read worklog m3-fe-2c §7 contract + page.tsx shell flow, then scoped all edits to src/modules/chart/ChartView.tsx only
+- Panel container: removed `pointerEvents:'none'`, added `data-chart-ui` (drawing hit-test now ignores the list, like the focus badge)
+- ALL signals rendered (was slice(-6)): `signals.slice().reverse()` newest-first in the existing scroll column (maxHeight 168 / overflowY auto); each row is now `<button type="button">` full-width, hover `var(--bg-hover)`, border-radius 6, padding 4px 6px, disabled while loading; inner layout kept (icon + Long/Short + price + TP/SL + status badge)
+- Row hover/disabled/pending styles ship via a React-hoisted `<style href="tb-sig-row">` (globals.css is off-limits — owned by parallel agents); backgrounds live in the sheet so :hover isn't shadowed by inline styles; pending row keeps 1px dashed var(--warning) + warning-soft tint (data-pending attr)
+- Per-row compact Jalali time chip: fmtDateTime(s.signalConfirmedAt) (import added), split at ', ' → «۱۴۰۵/۰۷/۳۰ · ۰۱:۳۰», full value in row title; title/aria «نمایش سیگنال لانگ/شورت BTC در چارت — …» / «… در ساعت …»
+- Hint line «برای پرش به سیگنال، روی ردیف کلیک کنید» (fontSize 9.5, muted, marginTop 6) at panel bottom
+- Local focus path: `localFocus` state; focus-mirror effect now `focusRef.current = localFocus ?? focus ?? null` (still declared BEFORE the data-load effect); fresh non-null focus PROP clears localFocus — implemented with a VALUE-key comparison (signalTime+id+side) because the page shell rebuilds the focus payload object every render (identity churn from toast re-renders must not wipe an active local focus)
+- focusSignal(s): guards candleOpenTime (finite/>0); targets the ANALYSIS interval — if different, handleIntervalChange(target, {keepLocalFocus:true}) + toast «بازه چارت / برای نمایش دقیق سیگنال، بازه چارت به <iv> تغییر کرد»; payload mirrors page.tsx (side/price/tp/sl guards + signalId); same-interval clicks bump reloadKey (no remount); history-prefetch path in the load effect handles pre-window signals unchanged
+- Manual symbol/interval changes drop localFocus (setLocalFocus(null) in handleSymbolChange; keepLocalFocus flag on handleIntervalChange — explicit flag instead of relying on batched setLocalFocus(null)→set order, documented in code); handleBackToNow also clears localFocus
+- Verified: tsc 0 errors, eslint clean, tests/chart-focus-url 21✓
+
+Stage Summary:
+- E2E (agent-browser, admin login → «چارت حرفه‌ای», BTC 1h): 7 rows rendered = badge count 7 (was 6); clicked OLDEST signal (Long ۱۴۰۵/۰۶/۲۴) → __tbChart.focusInfo {barTimeSec:1789477200, side:Long, price:76588.5}, visibleRange 1789189200..1789621200 CONTAINS the bar, history-prefetch klines request (startTime=1788577200000) fired, marker at bar, focus badge + «بازگشت به اکنون» appeared (VLM screenshot: green up-arrow at candle + badge); back-to-now returned focusInfo null + original latest-bars range 1792317600..1792782000
+- Interval-switch path: chart on 15m/4h → click row → toast «برای نمایش دقیق سیگنال، بازه چارت به 1h تغییر کرد» shown, interval auto-switched to 1h, focus resolved; A→B row clicks switch focus without remount; manual interval change while locally focused drops the focus (focusInfo null, latest-bars centering); row hover = exactly rgb(241,245,249) (var(--bg-hover)); at 390px viewport panel (340px) fits inside chart wrap (366px) — VLM confirmed no overflow; dev.log tail clean, no console errors
