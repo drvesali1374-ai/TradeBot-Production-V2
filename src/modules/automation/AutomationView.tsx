@@ -29,6 +29,7 @@ import type { CycleResult, SymbolEntry, OpenPosition, LogRecord, BalanceInfo, Si
 import { CloseConfirmDialog } from '@/modules/automation/CloseConfirmDialog'
 import { LogExpandedDetails, SOURCE_LABELS } from '@/modules/automation/LogDetails'
 import { SymbolStatsTable, SymbolStatsCoverageNote, type SymbolStatsPayload } from '@/modules/automation/SymbolStatsTable'
+import { SymbolsTable } from '@/modules/automation/SymbolsTable'
 
 /* ------------------------------------------------------------------ */
 /* shared bits                                                         */
@@ -364,6 +365,12 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
       show('نمادها', e instanceof Error ? e.message : 'خطا', 'danger')
     }
   }
+
+  /** 5-b item 2 — keeps status.symbols in sync when SymbolsTable reorders
+   *  (optimistic local order; the table persists via its own POST). */
+  const handleSymbolsChange = useCallback((symbols: SymbolEntry[]) => {
+    setStatus((s) => (s ? { ...s, symbols } : s))
+  }, [])
 
   /** The ONLY network-triggering path — called by the dialog's «بستن پوزیشن». */
   const closePosition = async (pos: OpenPosition) => {
@@ -720,85 +727,6 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
     },
   ]
 
-  /* ---------------- symbols table (mission §9.2 — compact, fits the 1/3 panel) ---------------- */
-
-  /**
-   * Two-line Jalali datetime cell: the SINGLE fmtDateTime value, split at
-   * its «, » separator so the column stays ~78px wide inside the 1fr
-   * top-grid panel — the symbols table must NOT h-scroll at desktop widths.
-   * Both lines are nowrap; when the panel is very narrow the value stays
-   * intact (no mid-token break). Plain render fn (not a component) so rows
-   * don't remount on every view render.
-   */
-  const renderCellDateTime = (value: number | null) => {
-    const text = fmtDateTime(value)
-    if (text === UNKNOWN || !text.includes(', ')) {
-      return <span className="cell-dt num" style={{ fontSize: 10, display: 'inline-block', direction: 'rtl', unicodeBidi: 'isolate' }}>{text}</span>
-    }
-    const [date, time] = text.split(', ')
-    return (
-      <span className="cell-dt num" style={{ fontSize: 10, display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: 1.5, direction: 'rtl', unicodeBidi: 'isolate' }} title={text}>
-        <span style={{ whiteSpace: 'nowrap' }}>{date}،</span>
-        <span style={{ whiteSpace: 'nowrap' }}>{time}</span>
-      </span>
-    )
-  }
-
-  const symbolColumns: DataColumn<SymbolEntry>[] = [
-    { key: 'name', header: 'نماد', width: '50px', ltr: true, strong: true, render: (s) => <bdi style={{ fontSize: 11.5 }}>{s.name}</bdi> },
-    {
-      key: 'status',
-      header: 'وضعیت',
-      width: '58px',
-      align: 'center',
-      render: (s) => {
-        const meta =
-          s.status === 'waiting'
-            ? { text: 'آماده', cls: 'badge-info', full: 'آماده' }
-            : s.status === 'error'
-              ? { text: 'خطا', cls: 'badge-danger', full: 'خطا' }
-              : { text: 'در اجرا', cls: 'badge-accent', full: 'در حال اجرا' }
-        return (
-          <span className={`badge ${meta.cls}`} style={{ fontSize: 9, padding: '2px 6px' }} title={meta.full}>
-            {meta.text}
-          </span>
-        )
-      },
-    },
-    {
-      key: 'errors',
-      header: 'خطا',
-      width: '34px',
-      align: 'end',
-      ltr: true,
-      render: (s) => (
-        <span className="num" style={{ color: s.errorCount > 0 ? 'var(--danger)' : 'var(--text-muted)', fontSize: 11 }}>
-          {s.errorCount}
-        </span>
-      ),
-    },
-    {
-      key: 'lastCycle',
-      header: 'آخرین چرخه',
-      width: '78px',
-      align: 'end',
-      // mission §9.2 — full Jalali datetime (with seconds), wrapped to two
-      // lines so the compact table fits its 1/3 panel without h-scroll
-      render: (s) => renderCellDateTime(s.lastCycleTime),
-    },
-    {
-      key: 'remove',
-      header: 'عملیات',
-      width: '42px',
-      align: 'center',
-      render: (s) => (
-        <button type="button" className="btn btn-ghost btn-sm" style={{ padding: '4px 5px' }} onClick={() => removeSymbol(s.name)} title={`حذف ${s.name}`} aria-label={`حذف ${s.name}`}>
-          <i className="ph ph-trash" style={{ fontSize: 13 }} aria-hidden />
-        </button>
-      ),
-    },
-  ]
-
   /* ---------------- signals table ---------------- */
 
   // item 7 — rows are NOT clickable anymore: navigation to the chart is
@@ -864,7 +792,7 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
           title="نمایش در چارت حرفه‌ای"
           aria-label={`نمایش ${shortSymbol(s.symbol)} در چارت حرفه‌ای`}
         >
-          <i className="ph ph-candlestick-chart" aria-hidden />
+          <i className="ph ph-chart-line-up" aria-hidden />
         </button>
       ),
     },
@@ -904,15 +832,14 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
                 <i className="ph ph-plus" aria-hidden />
               </button>
             </div>
-            <DataTable
-              label="نمادها و زمان‌بندی"
-              columns={symbolColumns}
-              rows={status?.symbols ?? []}
-              rowKey={(s) => String(s.id)}
-              compact
-              fixed
-              minWidth="240px"
-              maxHeight={280}
+            {/* 5-b item 2 — dedicated reorderable table (up/down buttons +
+                pointer drag + «قفل چرخه» countdown); the shared DataTable
+                component stays untouched. */}
+            <SymbolsTable
+              symbols={status?.symbols ?? []}
+              tradeWaitTime={status?.tradeWaitTime ?? 60}
+              onRemove={removeSymbol}
+              onSymbolsChange={handleSymbolsChange}
             />
             <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
               زمان انتظار بین چرخه‌های هر نماد: <span className="num">{status?.tradeWaitTime ?? 60}</span> دقیقه
@@ -1183,7 +1110,7 @@ export function AutomationView({ refreshKey, onRefreshAll, onGoChart, onGoSignal
       {/* ============ market data + signals (mission §7-§8) ============ */}
       <PanelCard
         title="داده بازار و سیگنال‌ها"
-        icon="ph-fill ph-chart-candlestick"
+        icon="ph-fill ph-chart-line-up"
         actions={
           <>
             <select

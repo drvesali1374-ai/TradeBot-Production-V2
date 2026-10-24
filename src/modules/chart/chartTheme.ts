@@ -5,8 +5,8 @@
  * them into lightweight-charts options / canvas overlay colors.
  * Re-read on every theme flip (data-theme attribute on <html>).
  */
-import { CrosshairMode, LineStyle } from 'lightweight-charts'
-import type { ChartOptions, DeepPartial } from 'lightweight-charts'
+import { CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
+import type { ChartOptions, DeepPartial, TickMarkFormatter, Time } from 'lightweight-charts'
 
 export interface ChartPalette {
   /** chart pane background (—bg-input) */
@@ -55,6 +55,43 @@ export function readPalette(): ChartPalette {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Jalali (Persian calendar) time-axis formatting                      */
+/* ------------------------------------------------------------------ */
+
+const jalaliTickFmt = new Intl.DateTimeFormat('fa-IR-u-nu-arabext', {
+  calendar: 'persian', timeZone: 'UTC', year: 'numeric', month: 'short', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+})
+
+function tickParts(d: Date): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const p of jalaliTickFmt.formatToParts(d)) out[p.type] = p.value
+  return out
+}
+
+/**
+ * Axis tick labels in the Persian (Jalali) calendar + Persian digits.
+ * Time values on the axis are Tehran wall-clock (ChartView shifts data by
+ * UTC+03:30 before handing it to lightweight-charts), so they are formatted
+ * as UTC to render Tehran local time exactly.
+ * NOTE: lightweight-charts v5's TickMarkType is a NUMERIC enum — the
+ * with-seconds variant is `TimeWithSeconds` (=4).
+ */
+const jalaliTickMarkFormatter: TickMarkFormatter = (time, tickMarkType) => {
+  const t = time as number
+  const d = new Date(t * 1000)
+  const p = tickParts(d)
+  switch (tickMarkType) {
+    case TickMarkType.Year: return p.year ?? ''
+    case TickMarkType.Month: return p.month ?? ''
+    case TickMarkType.DayOfMonth: return `${p.day} ${p.month}`   // e.g. «۳۱ مهر» — exact Jalali date on the axis
+    case TickMarkType.Time: return `${p.hour}:${p.minute}`       // Tehran wall-clock HH:mm
+    case TickMarkType.TimeWithSeconds: return `${p.hour}:${p.minute}:${p.second}`
+    default: return `${p.day} ${p.month}`
+  }
+}
+
 /** Chart options derived from the palette (applied on create + theme change). */
 export function chartOptionsFor(p: ChartPalette): DeepPartial<ChartOptions> {
   return {
@@ -93,6 +130,16 @@ export function chartOptionsFor(p: ChartPalette): DeepPartial<ChartOptions> {
       secondsVisible: false,
       rightOffset: 5,
       barSpacing: 8,
+      tickMarkFormatter: jalaliTickMarkFormatter,
+    },
+    localization: {
+      locale: 'fa-IR',
+      // crosshair label — full Jalali date + Tehran time
+      timeFormatter: (time: Time) => {
+        const d = new Date((time as number) * 1000)
+        const p = tickParts(d)
+        return `${p.year}/${p.month}/${p.day}، ${p.hour}:${p.minute}:${p.second}`
+      },
     },
     handleScale: {
       axisPressedMouseMove: true,

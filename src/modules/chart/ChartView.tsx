@@ -61,6 +61,17 @@ import {
 } from './types'
 
 /* ------------------------------------------------------------------ */
+/* Tehran wall-clock shift (Jalali axis, item 5-a/4)                  */
+/* ------------------------------------------------------------------ */
+
+/** Tehran is UTC+03:30 (fixed — no DST). lightweight-charts renders Time as
+ * UTC, so shifting every chart-facing time by the Tehran offset makes the
+ * axis show Tehran wall-clock and puts day boundaries at Tehran midnight. */
+const TEHRAN_OFFSET_SEC = 12600
+/** real epoch ms → chart time (Tehran-shifted seconds) */
+const toChartSec = (ms: number) => Math.floor(ms / 1000) + TEHRAN_OFFSET_SEC
+
+/* ------------------------------------------------------------------ */
 /* Props                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -91,9 +102,10 @@ const SIGNAL_STATUS_META: Record<SignalStatus, { label: string; cls: string }> =
 }
 
 /**
- * Greatest bar open-time (UNIX seconds) at-or-before targetMs.
- * Snapping keeps markers placeable even when the analysis interval differs
- * from the chart interval (larger intervals align to smaller boundaries).
+ * Greatest bar open-time (UNIX seconds, Tehran-shifted CHART time) at-or-
+ * before targetMs. Snapping keeps markers placeable even when the analysis
+ * interval differs from the chart interval (larger intervals align to
+ * smaller boundaries). Output feeds the chart API → toChartSec shift.
  */
 function snapBarTimeSec(candles: Candle[], targetMs: number, intervalMs: number): number | null {
   if (candles.length === 0) return null
@@ -113,7 +125,7 @@ function snapBarTimeSec(candles: Candle[], targetMs: number, intervalMs: number)
       hi = mid - 1
     }
   }
-  return Math.floor(candles[ans].openTime / 1000)
+  return toChartSec(candles[ans].openTime)
 }
 
 /**
@@ -171,7 +183,8 @@ const CUSTOM_SYMBOL_RE = /^[A-Z0-9]{2,16}$/
 
 /** Consumed focus — resolved after the data load (for badge/legend + E2E). */
 interface FocusInfo {
-  /** bar open-time in SECONDS (lightweight-charts Time unit) */
+  /** bar open-time in CHART-time SECONDS (lightweight-charts Time unit —
+   *  real seconds + TEHRAN_OFFSET_SEC, see toChartSec) */
   barTimeSec: number
   signal: ChartFocusPayload
 }
@@ -349,7 +362,7 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
     const lr = chart.timeScale().getVisibleLogicalRange()
     const last = candlesRef.current.length ? candlesRef.current[candlesRef.current.length - 1] : null
     const y = last ? series.priceToCoordinate(last.close) : null
-    const x = last ? chart.timeScale().timeToCoordinate((last.openTime / 1000) as UTCTimestamp) : null
+    const x = last ? chart.timeScale().timeToCoordinate(toChartSec(last.openTime) as UTCTimestamp) : null
     const draft = draftRef.current
     return [
       canvas.clientWidth,
@@ -559,13 +572,15 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
   const applyKlines = useCallback(
     (candles: Candle[], focusIdx = -1) => {
       candlesRef.current = candles
-      candlesByTimeRef.current = new Map(candles.map((c) => [Math.floor(c.openTime / 1000), c]))
+      // map keyed by CHART time (Tehran-shifted) — crosshair param.time and
+      // coordinateToTime return the same chart-sec, so lookups stay consistent
+      candlesByTimeRef.current = new Map(candles.map((c) => [toChartSec(c.openTime), c]))
       const series = candleRef.current
       const vol = volumeRef.current
       if (series && vol) {
         series.setData(
           candles.map((c) => ({
-            time: Math.floor(c.openTime / 1000) as UTCTimestamp,
+            time: toChartSec(c.openTime) as UTCTimestamp,
             open: c.open,
             high: c.high,
             low: c.low,
@@ -574,7 +589,7 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
         )
         vol.setData(
           candles.map((c) => ({
-            time: Math.floor(c.openTime / 1000) as UTCTimestamp,
+            time: toChartSec(c.openTime) as UTCTimestamp,
             value: c.volume,
             color: c.close >= c.open ? UP_VOLUME : DOWN_VOLUME,
           })),
@@ -585,7 +600,7 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
         if (focusIdx >= 0 && focusSignal && candles[focusIdx]) {
           // §7.2 — center ON the signal's candle (replaces the default
           // last-130 centering) and activate the focus visuals.
-          const barSec = Math.floor(candles[focusIdx].openTime / 1000)
+          const barSec = toChartSec(candles[focusIdx].openTime)
           focusBarSecRef.current = barSec
           focusActiveRef.current = true
           setFocusInfo({ barTimeSec: barSec, signal: focusSignal })
@@ -617,7 +632,7 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
       const rsiMap = new Map<number, number>()
       if (an) {
         for (const c of an.candles ?? []) {
-          if (c.rsi != null) rsiMap.set(Math.floor(c.openTime / 1000), c.rsi)
+          if (c.rsi != null) rsiMap.set(toChartSec(c.openTime), c.rsi)
         }
       }
       rsiByTimeRef.current = rsiMap
@@ -1305,7 +1320,7 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
   /* Render                                                            */
   /* ---------------------------------------------------------------- */
 
-  const rsiVal = hoverCandle ? rsiByTimeRef.current.get(Math.floor(hoverCandle.openTime / 1000)) : undefined
+  const rsiVal = hoverCandle ? rsiByTimeRef.current.get(toChartSec(hoverCandle.openTime)) : undefined
   const up = hoverCandle ? hoverCandle.close >= hoverCandle.open : true
   const rsiColor =
     rsiVal == null
@@ -1441,133 +1456,6 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
             </>
           ) : null}
         </div>
-
-        {/* signal legend panel — auto-sizes to its content (never clips).
-            m4 (item 4): every row is a BUTTON — clicking it focuses the chart
-            on that signal's candle (§7 pipeline). data-chart-ui keeps the
-            drawing hit-test away from the list. */}
-        {showSignals && signalState && signalState.signals.length > 0 ? (
-          <div
-            data-chart-ui
-            style={{
-              position: 'absolute',
-              bottom: 46,
-              left: 12,
-              zIndex: 3,
-              direction: 'rtl',
-              width: 'max-content',
-              minWidth: 210,
-              maxWidth: 'min(360px, calc(100% - 24px))',
-              padding: '8px 10px',
-              borderRadius: 10,
-              background: 'color-mix(in srgb, var(--bg-input) 84%, transparent)',
-              border: '1px solid var(--border-soft)',
-              backdropFilter: 'blur(6px)',
-              fontSize: 11,
-              color: 'var(--text-secondary)',
-            }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                flexWrap: 'wrap',
-                gap: 6,
-                marginBottom: 6,
-                color: 'var(--text-primary)',
-                fontWeight: 700,
-                fontSize: 11.5,
-              }}
-            >
-              <i className="ph ph-chart-line-up" style={{ color: 'var(--accent)', fontSize: 14 }} aria-hidden />
-              سیگنال‌های اخیر
-              <span className="badge badge-accent" style={{ fontSize: 10, padding: '2px 8px' }}>
-                <span className="num">{signalState.signals.length}</span>
-              </span>
-              {signalState.analysisInterval && signalState.analysisInterval !== interval ? (
-                <span className="badge badge-warning" style={{ fontSize: 9.5, padding: '2px 7px' }}>
-                  بازه تحلیل <span className="num">{signalState.analysisInterval}</span>
-                </span>
-              ) : null}
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 5, maxHeight: 168, overflowY: 'auto' }}>
-              {signalState.signals
-                .slice() // m4 — ALL signals (was slice(-6)), newest first
-                .reverse()
-                .map((s) => {
-                  const isLong = s.side === 'Long'
-                  const isPending = signalState.pending?.id === s.id
-                  const st = s.status ? SIGNAL_STATUS_META[s.status] : null
-                  // m4 — compact Jalali chip: full «YYYY/MM/DD, HH:mm:ss»
-                  // lives in the row title; the chip shows date · HH:mm.
-                  const dtFull = fmtDateTime(s.signalConfirmedAt)
-                  const [dtDate, dtTime] = dtFull.split(', ')
-                  const dtChip = dtDate && dtTime ? `${dtDate} · ${dtTime.slice(0, 5)}` : dtFull
-                  return (
-                    <button
-                      key={s.id}
-                      type="button"
-                      className="tb-sig-row"
-                      data-pending={isPending ? 'true' : undefined}
-                      disabled={loading}
-                      onClick={() => focusSignal(s)}
-                      title={`نمایش سیگنال ${isLong ? 'لانگ' : 'شورت'} ${symbol} در چارت — ${dtFull}`}
-                      aria-label={`نمایش سیگنال ${isLong ? 'لانگ' : 'شورت'} ${symbol} در ساعت ${dtTime ?? dtFull}`}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        flexWrap: 'wrap',
-                        gap: 6,
-                        rowGap: 2,
-                        justifyContent: 'space-between',
-                        width: '100%',
-                        textAlign: 'start',
-                        padding: '4px 6px',
-                        borderRadius: 6,
-                        fontFamily: 'inherit',
-                        fontSize: 'inherit',
-                        color: 'inherit',
-                        lineHeight: 1.6,
-                      }}
-                    >
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-                        <i
-                          className={`ph ${isLong ? 'ph-trend-up' : 'ph-trend-down'}`}
-                          style={{ color: isLong ? 'var(--success)' : 'var(--danger)', fontSize: 13 }}
-                          aria-hidden
-                        />
-                        <b style={{ color: isLong ? 'var(--success)' : 'var(--danger)' }}>{isLong ? 'Long' : 'Short'}</b>
-                        {isPending ? (
-                          <i className="ph ph-clock" style={{ color: 'var(--warning)', fontSize: 12 }} aria-hidden />
-                        ) : null}
-                      </span>
-                      <span className="num" style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: 10.5 }}>
-                        {fmtPrice(s.price)}
-                      </span>
-                      <span className="num" style={{ fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
-                        TP {fmtNum(s.tp, 1)} / SL {fmtNum(s.sl, 1)}
-                      </span>
-                      <span
-                        className="num"
-                        title={dtFull}
-                        style={{ fontSize: 9.5, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}
-                      >
-                        {dtChip}
-                      </span>
-                      {st ? (
-                        <span className={`badge ${st.cls}`} style={{ fontSize: 9.5, padding: '2px 7px', flexShrink: 0 }}>
-                          {st.label}
-                        </span>
-                      ) : null}
-                    </button>
-                  )
-                })}
-            </div>
-            <div style={{ fontSize: 9.5, color: 'var(--text-muted)', marginTop: 6 }}>
-              برای پرش به سیگنال، روی ردیف کلیک کنید
-            </div>
-          </div>
-        ) : null}
 
         {/* §7 — focus badge: why the chart is centered here + quick way back */}
         {focusInfo ? (
@@ -1763,6 +1651,125 @@ export function ChartView({ initialSymbol, initialInterval, focus, onSymbolChang
           </div>
         ) : null}
       </div>
+
+      {/* m5-a (item 1) — signals panel BELOW the chart (was an in-chart
+          absolute overlay): normal flow, full width — the chart is now fully
+          visible. m4 (item 4) row behavior kept: every row is a BUTTON —
+          clicking it focuses the chart on that signal's candle (§7 pipeline). */}
+      {showSignals && signalState && signalState.signals.length > 0 ? (
+        <div
+          style={{
+            direction: 'rtl',
+            width: '100%',
+            padding: '10px 12px',
+            borderRadius: 10,
+            border: '1px solid var(--border-soft)',
+            background: 'var(--bg-input)',
+            fontSize: 11,
+            color: 'var(--text-secondary)',
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: 6,
+              marginBottom: 6,
+              color: 'var(--text-primary)',
+              fontWeight: 700,
+              fontSize: 11.5,
+            }}
+          >
+            <i className="ph ph-chart-line-up" style={{ color: 'var(--accent)', fontSize: 14 }} aria-hidden />
+            سیگنال‌های اخیر
+            <span className="badge badge-accent" style={{ fontSize: 10, padding: '2px 8px' }}>
+              <span className="num">{signalState.signals.length}</span>
+            </span>
+            {signalState.analysisInterval && signalState.analysisInterval !== interval ? (
+              <span className="badge badge-warning" style={{ fontSize: 9.5, padding: '2px 7px' }}>
+                بازه تحلیل <span className="num">{signalState.analysisInterval}</span>
+              </span>
+            ) : null}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5, maxHeight: 220, overflowY: 'auto' }}>
+            {signalState.signals
+              .slice() // m4 — ALL signals (was slice(-6)), newest first
+              .reverse()
+              .map((s) => {
+                const isLong = s.side === 'Long'
+                const isPending = signalState.pending?.id === s.id
+                const st = s.status ? SIGNAL_STATUS_META[s.status] : null
+                // m4 — compact Jalali chip: full «YYYY/MM/DD, HH:mm:ss»
+                // lives in the row title; the chip shows date · HH:mm.
+                const dtFull = fmtDateTime(s.signalConfirmedAt)
+                const [dtDate, dtTime] = dtFull.split(', ')
+                const dtChip = dtDate && dtTime ? `${dtDate} · ${dtTime.slice(0, 5)}` : dtFull
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    className="tb-sig-row"
+                    data-pending={isPending ? 'true' : undefined}
+                    disabled={loading}
+                    onClick={() => focusSignal(s)}
+                    title={`نمایش سیگنال ${isLong ? 'لانگ' : 'شورت'} ${symbol} در چارت — ${dtFull}`}
+                    aria-label={`نمایش سیگنال ${isLong ? 'لانگ' : 'شورت'} ${symbol} در ساعت ${dtTime ?? dtFull}`}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      flexWrap: 'wrap',
+                      gap: 6,
+                      rowGap: 2,
+                      justifyContent: 'space-between',
+                      width: '100%',
+                      textAlign: 'start',
+                      padding: '4px 6px',
+                      borderRadius: 6,
+                      fontFamily: 'inherit',
+                      fontSize: 'inherit',
+                      color: 'inherit',
+                      lineHeight: 1.6,
+                    }}
+                  >
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                      <i
+                        className={`ph ${isLong ? 'ph-trend-up' : 'ph-trend-down'}`}
+                        style={{ color: isLong ? 'var(--success)' : 'var(--danger)', fontSize: 13 }}
+                        aria-hidden
+                      />
+                      <b style={{ color: isLong ? 'var(--success)' : 'var(--danger)' }}>{isLong ? 'Long' : 'Short'}</b>
+                      {isPending ? (
+                        <i className="ph ph-clock" style={{ color: 'var(--warning)', fontSize: 12 }} aria-hidden />
+                      ) : null}
+                    </span>
+                    <span className="num" style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: 10.5 }}>
+                      {fmtPrice(s.price)}
+                    </span>
+                    <span className="num" style={{ fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                      TP {fmtNum(s.tp, 1)} / SL {fmtNum(s.sl, 1)}
+                    </span>
+                    <span
+                      className="num"
+                      title={dtFull}
+                      style={{ fontSize: 9.5, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}
+                    >
+                      {dtChip}
+                    </span>
+                    {st ? (
+                      <span className={`badge ${st.cls}`} style={{ fontSize: 9.5, padding: '2px 7px', flexShrink: 0 }}>
+                        {st.label}
+                      </span>
+                    ) : null}
+                  </button>
+                )
+              })}
+          </div>
+          <div style={{ fontSize: 9.5, color: 'var(--text-muted)', marginTop: 6 }}>
+            برای پرش به سیگنال، روی ردیف کلیک کنید
+          </div>
+        </div>
+      ) : null}
 
       <p className="form-hint" style={{ marginTop: -2 }}>
         <i className="ph ph-info" style={{ color: 'var(--accent)', verticalAlign: '-2px' }} aria-hidden />{' '}

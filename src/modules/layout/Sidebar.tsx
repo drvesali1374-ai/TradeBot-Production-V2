@@ -26,7 +26,10 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { id: 'automation', label: 'اتوماسیون', icon: 'ph-fill ph-robot', description: 'پنل کنترل چرخه‌های معاملاتی' },
-  { id: 'chart', label: 'چارت حرفه‌ای', icon: 'ph-fill ph-candlestick-chart', description: 'نمودار تعاملی با ابزار رسم' },
+  // 5-b item 3 — 'ph-candlestick-chart' does NOT exist in
+  // @phosphor-icons/web@2.1.2 (the icon rendered invisibly);
+  // 'ph-chart-line-up' is the installed equivalent.
+  { id: 'chart', label: 'چارت حرفه‌ای', icon: 'ph-fill ph-chart-line-up', description: 'نمودار تعاملی با ابزار رسم' },
   { id: 'settings', label: 'تنظیمات', icon: 'ph-fill ph-gear-six', description: 'استراتژی، صرافی و اعلان‌ها' },
 ]
 
